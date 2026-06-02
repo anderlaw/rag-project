@@ -15,7 +15,7 @@
 9. 混合检索方案
 10. 调试与日志方案
 11. 用户反馈与失败案例方案
-12. 测试集与评估方案
+12. 测试用例录入、审核与评估方案
 13. 技术选型与插件
 14. 核心伪代码
 15. 开发落地顺序
@@ -92,8 +92,8 @@ ORM：SQLAlchemy
 向量扩展：pgvector
 全文检索：PostgreSQL Full Text Search
 模糊检索：pg_trgm
-Embedding：OpenAI / 通义 / bge-m3 / 其他 embedding API
-LLM：OpenAI / DeepSeek / 通义 / Claude
+Embedding：通义向量（tongyi-embedding-vision-plus-2026-03-06）
+LLM：智谱大模型
 文件解析：pypdf / pymupdf / python-docx / markdown parser
 异步任务：MVP 同步处理，后续可接 Celery / RQ / Dramatiq
 日志：Python logging
@@ -367,6 +367,8 @@ AUTO_RULE：系统规则自动生成
 
 用于持续优化检索质量。
 
+测试用例先进入草稿和审核流程，审核通过后才参与固定评测。
+
 测试集不需要覆盖所有 chunk，而是覆盖：
 
 ```txt
@@ -379,6 +381,59 @@ AUTO_RULE：系统规则自动生成
 ---
 
 # 6. 数据库表设计
+
+数据库关系策略：
+
+```txt
+本系统不使用数据库物理外键。
+所有 xxx_id 字段均为逻辑外键，由 service / repo 层校验关联是否存在、是否属于同一业务范围、是否允许删除。
+数据库层保留主键、唯一约束、CHECK 约束和必要索引，但不使用 REFERENCES / FOREIGN KEY / ON DELETE。
+删除、归档、版本切换等级联动作由业务代码在事务中显式处理，避免物理外键带来的迁移、导入、重建索引和历史日志保留问题。
+```
+
+逻辑外键索引建议：
+
+```sql
+CREATE INDEX idx_rag_documents_current_version
+ON rag_documents(current_version_id);
+
+CREATE INDEX idx_rag_document_versions_document
+ON rag_document_versions(document_id);
+
+CREATE INDEX idx_rag_query_logs_search_profile
+ON rag_query_logs(search_profile_id);
+
+CREATE INDEX idx_rag_query_candidates_query_log
+ON rag_query_candidates(query_log_id);
+
+CREATE INDEX idx_rag_feedback_query_log
+ON rag_feedback(query_log_id);
+
+CREATE INDEX idx_rag_failure_cases_query_log
+ON rag_failure_cases(query_log_id);
+
+CREATE INDEX idx_rag_eval_expected_sources_case
+ON rag_eval_expected_sources(eval_case_id);
+
+CREATE INDEX idx_rag_eval_runs_search_profile
+ON rag_eval_runs(search_profile_id);
+
+CREATE INDEX idx_rag_eval_results_run
+ON rag_eval_results(eval_run_id);
+
+CREATE INDEX idx_rag_eval_results_case
+ON rag_eval_results(eval_case_id);
+
+CREATE INDEX idx_rag_eval_results_query_log
+ON rag_eval_results(query_log_id);
+```
+
+说明：
+
+```txt
+这些索引不是物理外键，只是为了支撑按逻辑关系查询、校验和清理。
+rag_chunks 的 document_version_id、parent_chunk_id 等索引在 rag_chunks 表小节中单独定义。
+```
 
 ## 6.1 rag_documents
 
@@ -442,13 +497,23 @@ COMMENT ON COLUMN rag_documents.updated_at IS '文档最近更新时间';
 ```sql
 CREATE TABLE rag_document_versions (
   id BIGSERIAL PRIMARY KEY,
-  document_id BIGINT NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
+  document_id BIGINT NOT NULL,
   version_no INT NOT NULL,
   file_hash TEXT NOT NULL,
+  original_filename TEXT,
+  storage_key TEXT,
+  parser_version TEXT,
+  parser_config_snapshot JSONB,
+  chunk_strategy_name TEXT,
+  chunk_config_snapshot JSONB,
   status TEXT NOT NULL DEFAULT 'PROCESSING',
   chunk_count INT DEFAULT 0,
   error_message TEXT,
-  created_at TIMESTAMP DEFAULT now()
+  created_at TIMESTAMP DEFAULT now(),
+  processed_at TIMESTAMP,
+
+  UNIQUE (document_id, version_no),
+  UNIQUE (document_id, id)
 );
 
 COMMENT ON TABLE rag_document_versions IS '文档版本表，每次上传或更新文档都会创建新版本';
@@ -456,10 +521,17 @@ COMMENT ON COLUMN rag_document_versions.id IS '文档版本主键 ID';
 COMMENT ON COLUMN rag_document_versions.document_id IS '所属文档 ID';
 COMMENT ON COLUMN rag_document_versions.version_no IS '版本号，从 1 开始递增';
 COMMENT ON COLUMN rag_document_versions.file_hash IS '文件内容 hash，用于判断文件是否变化';
+COMMENT ON COLUMN rag_document_versions.original_filename IS '原始上传文件名';
+COMMENT ON COLUMN rag_document_versions.storage_key IS '原始文件存储位置或对象存储 key';
+COMMENT ON COLUMN rag_document_versions.parser_version IS '业务解析流水线版本，例如 pdf-parser-v1，不只是第三方库版本';
+COMMENT ON COLUMN rag_document_versions.parser_config_snapshot IS '解析配置快照，记录解析器名称、规则版本、第三方库版本和关键参数';
+COMMENT ON COLUMN rag_document_versions.chunk_strategy_name IS 'chunk 策略名称，例如 parent_child_v1';
+COMMENT ON COLUMN rag_document_versions.chunk_config_snapshot IS 'chunk 配置快照，记录 parent/child 大小、overlap、是否按标题切分等参数';
 COMMENT ON COLUMN rag_document_versions.status IS '版本处理状态，PROCESSING、COMPLETED、FAILED';
 COMMENT ON COLUMN rag_document_versions.chunk_count IS '该版本生成的 chunk 数量';
 COMMENT ON COLUMN rag_document_versions.error_message IS '处理失败时的错误信息';
 COMMENT ON COLUMN rag_document_versions.created_at IS '版本创建时间';
+COMMENT ON COLUMN rag_document_versions.processed_at IS '版本处理完成或失败时间';
 ```
 
 字段说明：
@@ -470,10 +542,17 @@ COMMENT ON COLUMN rag_document_versions.created_at IS '版本创建时间';
 | document_id   | BIGINT    | 所属文档     |
 | version_no    | INT       | 版本号      |
 | file_hash     | TEXT      | 文件 hash  |
+| original_filename | TEXT      | 原始文件名    |
+| storage_key   | TEXT      | 文件存储位置   |
+| parser_version | TEXT     | 业务解析流水线版本 |
+| parser_config_snapshot | JSONB | 解析配置快照 |
+| chunk_strategy_name | TEXT | chunk 策略名称 |
+| chunk_config_snapshot | JSONB | chunk 配置快照 |
 | status        | TEXT      | 处理状态     |
 | chunk_count   | INT       | chunk 数量 |
 | error_message | TEXT      | 错误信息     |
 | created_at    | TIMESTAMP | 创建时间     |
+| processed_at  | TIMESTAMP | 处理完成时间   |
 
 状态枚举：
 
@@ -481,6 +560,47 @@ COMMENT ON COLUMN rag_document_versions.created_at IS '版本创建时间';
 PROCESSING
 COMPLETED
 FAILED
+```
+
+逻辑外键说明：
+
+```txt
+current_version_id 允许为空，表示文档尚未成功入库。
+业务层必须保证 current_version_id 指向同一 document_id 下 status=COMPLETED 的 rag_document_versions.id。
+切换当前版本必须在同一事务中完成版本状态更新和 rag_documents.current_version_id 更新。
+```
+
+解析与 chunk 配置说明：
+
+```txt
+parser_version 表示业务里的解析流水线版本，而不是单纯的第三方插件版本。
+例如 pdf-parser-v1、pdf-parser-v2-heading-regex、docx-parser-v1。
+如果第三方库版本、标题识别规则、表格提取策略、去页眉页脚规则发生变化，都应该体现在 parser_config_snapshot 中。
+
+chunk_strategy_name 只保存策略名。
+chunk_config_snapshot 保存真正影响切片结果的参数，使用 JSONB 是为了保留结构化配置，方便后续复现入库结果和比较不同版本。
+```
+
+示例：
+
+```json
+{
+  "parser_version": "pdf-parser-v1",
+  "parser_config_snapshot": {
+    "parser": "pymupdf",
+    "library_version": "1.24.x",
+    "heading_rule_version": "heading-regex-v1",
+    "remove_header_footer": true
+  },
+  "chunk_strategy_name": "parent_child_v1",
+  "chunk_config_snapshot": {
+    "split_by_heading": true,
+    "parent_chunk_size": 1600,
+    "child_chunk_size": 500,
+    "child_overlap": 80,
+    "embedding_text": "content_with_context"
+  }
+}
 ```
 
 ---
@@ -500,13 +620,14 @@ parent chunk 用于回答上下文。
 CREATE TABLE rag_chunks (
   id BIGSERIAL PRIMARY KEY,
 
-  document_id BIGINT NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
-  document_version_id BIGINT NOT NULL REFERENCES rag_document_versions(id) ON DELETE CASCADE,
+  document_id BIGINT NOT NULL,
+  document_version_id BIGINT NOT NULL,
 
-  parent_chunk_id BIGINT REFERENCES rag_chunks(id) ON DELETE CASCADE,
+  parent_chunk_id BIGINT,
 
   chunk_type TEXT NOT NULL,
   chunk_index INT NOT NULL,
+  child_index INT,
 
   section_title TEXT,
   heading_path TEXT,
@@ -517,7 +638,7 @@ CREATE TABLE rag_chunks (
   end_char INT,
 
   content TEXT NOT NULL,
-  content_with_context TEXT NOT NULL,
+  content_with_context TEXT,
 
   content_hash TEXT,
   token_count INT,
@@ -527,7 +648,32 @@ CREATE TABLE rag_chunks (
   search_text TEXT,
   search_tsv tsvector,
 
-  created_at TIMESTAMP DEFAULT now()
+  created_at TIMESTAMP DEFAULT now(),
+
+  UNIQUE (document_id, document_version_id, id),
+  UNIQUE (document_version_id, chunk_type, chunk_index),
+  UNIQUE (parent_chunk_id, child_index),
+
+  CONSTRAINT chk_rag_chunks_type
+    CHECK (chunk_type IN ('PARENT', 'CHILD')),
+
+  CONSTRAINT chk_rag_chunks_parent
+    CHECK (
+      (
+        chunk_type = 'PARENT'
+        AND parent_chunk_id IS NULL
+        AND child_index IS NULL
+        AND embedding IS NULL
+      )
+      OR
+      (
+        chunk_type = 'CHILD'
+        AND parent_chunk_id IS NOT NULL
+        AND child_index IS NOT NULL
+        AND content_with_context IS NOT NULL
+        AND embedding IS NOT NULL
+      )
+    )
 );
 
 COMMENT ON TABLE rag_chunks IS '文档切片表，保存 parent chunk 和 child chunk';
@@ -536,7 +682,8 @@ COMMENT ON COLUMN rag_chunks.document_id IS '所属文档 ID';
 COMMENT ON COLUMN rag_chunks.document_version_id IS '所属文档版本 ID';
 COMMENT ON COLUMN rag_chunks.parent_chunk_id IS '父 chunk ID，child chunk 通过该字段关联 parent chunk';
 COMMENT ON COLUMN rag_chunks.chunk_type IS 'chunk 类型，PARENT 或 CHILD';
-COMMENT ON COLUMN rag_chunks.chunk_index IS 'chunk 在当前文档版本中的顺序';
+COMMENT ON COLUMN rag_chunks.chunk_index IS 'chunk 在当前文档版本、同一 chunk_type 下的全局顺序';
+COMMENT ON COLUMN rag_chunks.child_index IS 'child chunk 在所属 parent chunk 内的顺序，PARENT 行为空';
 COMMENT ON COLUMN rag_chunks.section_title IS '当前 chunk 所属章节标题';
 COMMENT ON COLUMN rag_chunks.heading_path IS '标题路径，例如 公司制度 / 报销制度 / 差旅报销';
 COMMENT ON COLUMN rag_chunks.page_start IS 'chunk 起始页码，主要用于 PDF';
@@ -544,7 +691,7 @@ COMMENT ON COLUMN rag_chunks.page_end IS 'chunk 结束页码，主要用于 PDF'
 COMMENT ON COLUMN rag_chunks.start_char IS 'chunk 在原始文本中的起始字符位置';
 COMMENT ON COLUMN rag_chunks.end_char IS 'chunk 在原始文本中的结束字符位置';
 COMMENT ON COLUMN rag_chunks.content IS '原始 chunk 内容，用于展示给用户';
-COMMENT ON COLUMN rag_chunks.content_with_context IS '带文档名、标题、页码的上下文文本，用于生成 embedding';
+COMMENT ON COLUMN rag_chunks.content_with_context IS '带文档名、标题、页码的上下文文本，CHILD 必填，用于生成 embedding';
 COMMENT ON COLUMN rag_chunks.content_hash IS 'chunk 内容 hash，用于判断是否变化和去重';
 COMMENT ON COLUMN rag_chunks.token_count IS 'chunk token 或字符数量估算';
 COMMENT ON COLUMN rag_chunks.embedding IS 'embedding 向量，通常只给 CHILD chunk 生成';
@@ -562,7 +709,8 @@ COMMENT ON COLUMN rag_chunks.created_at IS 'chunk 创建时间';
 | document_version_id  | BIGINT       | 所属文档版本              |
 | parent_chunk_id      | BIGINT       | 父 chunk ID          |
 | chunk_type           | TEXT         | PARENT / CHILD      |
-| chunk_index          | INT          | 顺序                  |
+| chunk_index          | INT          | 同类型全局顺序             |
+| child_index          | INT          | 父 chunk 内子顺序         |
 | section_title        | TEXT         | 章节标题                |
 | heading_path         | TEXT         | 标题路径                |
 | page_start           | INT          | 起始页码                |
@@ -570,13 +718,36 @@ COMMENT ON COLUMN rag_chunks.created_at IS 'chunk 创建时间';
 | start_char           | INT          | 起始字符                |
 | end_char             | INT          | 结束字符                |
 | content              | TEXT         | 原始内容                |
-| content_with_context | TEXT         | 用于 embedding 的上下文文本 |
+| content_with_context | TEXT         | CHILD 必填，用于 embedding 的上下文文本 |
 | content_hash         | TEXT         | 内容 hash             |
 | token_count          | INT          | token 数             |
-| embedding            | VECTOR(1536) | 向量                  |
+| embedding            | VECTOR(1536) | PARENT 为空，CHILD 必填 |
 | search_text          | TEXT         | 关键词检索文本             |
 | search_tsv           | tsvector     | 全文检索向量              |
 | created_at           | TIMESTAMP    | 创建时间                |
+
+约束说明：
+
+```txt
+child chunk 必须指向同一 document_version 下的 parent chunk。
+parent chunk 不允许有 parent_chunk_id。
+child chunk 必须有 child_index，parent chunk 的 child_index 必须为空。
+chunk_index 表示当前 document_version 下，同一种 chunk_type 的全局顺序；因此 PARENT 0 和 CHILD 0 可以同时存在。
+业务层必须校验 document_id 与 document_version_id 一致，避免 chunk 被挂到错误文档版本。
+业务层必须校验 CHILD 的 parent_chunk_id 指向同一 document_version 下的 PARENT 行，避免 child 指向另一个 child。
+PARENT 不生成 embedding；CHILD 必须有 content_with_context 和 embedding。
+embedding 维度必须与实际 embedding 模型输出一致；如果模型不是 1536 维，建表时必须同步调整 VECTOR(N)。
+```
+
+字段填充建议：
+
+| 字段                 | PARENT | CHILD |
+| ------------------ | ------ | ----- |
+| content            | 必填     | 必填    |
+| content_with_context | 可空   | 必填    |
+| embedding          | 空      | 必填    |
+| search_text        | 可填     | 必填    |
+| search_tsv         | 可生成    | 可生成   |
 
 索引：
 
@@ -585,7 +756,8 @@ CREATE INDEX idx_rag_chunks_document_version
 ON rag_chunks(document_id, document_version_id);
 
 CREATE INDEX idx_rag_chunks_parent
-ON rag_chunks(parent_chunk_id);
+ON rag_chunks(parent_chunk_id, child_index)
+WHERE chunk_type = 'CHILD';
 
 CREATE INDEX idx_rag_chunks_type
 ON rag_chunks(chunk_type);
@@ -600,7 +772,18 @@ USING GIN(search_text gin_trgm_ops);
 
 CREATE INDEX idx_rag_chunks_embedding_hnsw
 ON rag_chunks
-USING hnsw (embedding vector_cosine_ops);
+USING hnsw (embedding vector_cosine_ops)
+WHERE chunk_type = 'CHILD' AND embedding IS NOT NULL;
+```
+
+查询某个 parent 下的 child：
+
+```sql
+SELECT *
+FROM rag_chunks
+WHERE parent_chunk_id = :parent_chunk_id
+  AND chunk_type = 'CHILD'
+ORDER BY child_index ASC;
 ```
 
 说明：
@@ -632,6 +815,9 @@ CREATE TABLE rag_query_logs (
   use_llm BOOLEAN NOT NULL DEFAULT true,
 
   search_profile_id BIGINT,
+  search_profile_snapshot JSONB,
+  model_config_snapshot JSONB,
+  answer_prompt_version TEXT,
 
   top_k INT DEFAULT 20,
   final_top_k INT DEFAULT 5,
@@ -639,7 +825,7 @@ CREATE TABLE rag_query_logs (
   embedding_model TEXT,
   llm_model TEXT,
 
-  prompt_text TEXT,
+  answer_prompt_text TEXT,
   answer TEXT,
 
   max_score FLOAT,
@@ -660,11 +846,14 @@ COMMENT ON COLUMN rag_query_logs.question IS '用户输入的问题';
 COMMENT ON COLUMN rag_query_logs.search_mode IS '检索模式，VECTOR、KEYWORD、TRIGRAM、HYBRID';
 COMMENT ON COLUMN rag_query_logs.use_llm IS '是否调用 LLM，false 表示只调试检索';
 COMMENT ON COLUMN rag_query_logs.search_profile_id IS '使用的搜索配置 ID';
+COMMENT ON COLUMN rag_query_logs.search_profile_snapshot IS '查询时的搜索配置快照，避免后续配置修改影响历史分析';
+COMMENT ON COLUMN rag_query_logs.model_config_snapshot IS '查询时实际生效的 embedding/LLM 模型配置快照，来自 settings 和模型服务运行时配置';
+COMMENT ON COLUMN rag_query_logs.answer_prompt_version IS '本次生成最终回答使用的主回答 prompt 版本标签，例如 rag_qa_v1；不是全套提示词的统一版本';
 COMMENT ON COLUMN rag_query_logs.top_k IS '候选检索数量';
 COMMENT ON COLUMN rag_query_logs.final_top_k IS '最终送入 prompt 的 chunk 数量';
 COMMENT ON COLUMN rag_query_logs.embedding_model IS '问题 embedding 使用的模型';
 COMMENT ON COLUMN rag_query_logs.llm_model IS '回答生成使用的 LLM 模型';
-COMMENT ON COLUMN rag_query_logs.prompt_text IS '最终发送给 LLM 的 prompt';
+COMMENT ON COLUMN rag_query_logs.answer_prompt_text IS '最终发送给 LLM 的主回答 prompt 快照';
 COMMENT ON COLUMN rag_query_logs.answer IS 'LLM 返回的回答';
 COMMENT ON COLUMN rag_query_logs.max_score IS '候选 chunk 中最高分';
 COMMENT ON COLUMN rag_query_logs.min_score IS '候选 chunk 中最低分';
@@ -684,11 +873,14 @@ COMMENT ON COLUMN rag_query_logs.created_at IS '查询创建时间';
 | search_mode       | TEXT      | 检索模式         |
 | use_llm           | BOOLEAN   | 是否调用 LLM     |
 | search_profile_id | BIGINT    | 搜索配置         |
+| search_profile_snapshot | JSONB | 搜索配置快照      |
+| model_config_snapshot | JSONB | 模型配置快照       |
+| answer_prompt_version | TEXT | 本次最终回答使用的主回答 prompt 代码版本，例如 rag_qa_v1 |
 | top_k             | INT       | 候选数量         |
 | final_top_k       | INT       | 入 prompt 数量  |
 | embedding_model   | TEXT      | embedding 模型 |
 | llm_model         | TEXT      | LLM 模型       |
-| prompt_text       | TEXT      | prompt       |
+| answer_prompt_text | TEXT     | 主回答 prompt 快照 |
 | answer            | TEXT      | 回答           |
 | max_score         | FLOAT     | 最高分          |
 | min_score         | FLOAT     | 最低分          |
@@ -697,6 +889,43 @@ COMMENT ON COLUMN rag_query_logs.created_at IS '查询创建时间';
 | total_latency_ms  | INT       | 总耗时          |
 | llm_error         | TEXT      | LLM 错误       |
 | created_at        | TIMESTAMP | 创建时间         |
+
+model_config_snapshot 来源：
+
+```txt
+model_config_snapshot 不是来自数据库表。
+它来自当前应用运行时配置，例如 .env、pydantic-settings、app/core/config.py，以及 embedding_service / llm_service 初始化时实际使用的参数。
+它用于记录这次 query 当时生效的模型配置，避免后续修改模型后，历史查询无法判断当时用了哪个 provider、model 和参数。
+不要在 model_config_snapshot 中保存 API key、secret、token 等敏感信息。
+```
+
+示例：
+
+```json
+{
+  "embedding": {
+    "provider": "tongyi",
+    "model": "tongyi-embedding-vision-plus-2026-03-06",
+    "dimension": 1536
+  },
+  "llm": {
+    "provider": "zhipu",
+    "model": "glm-configured-model",
+    "temperature": 0.2,
+    "max_tokens": 1024
+  }
+}
+```
+
+answer_prompt_version 来源：
+
+```txt
+answer_prompt_version 不是来自提示词表。
+MVP 阶段它由 app/services/prompt_builder.py 中的 ANSWER_PROMPT_VERSION 常量定义。
+该字段只记录主回答 prompt 的版本，例如 rag_qa_v1，不表示系统里所有提示词都是版本 1。
+调用链应使用 prompt_builder.build_answer_prompt(...) 返回的 version 写入该字段。
+如果本次没有实际构建主回答 prompt，例如 use_llm=false 或无召回内容直接拒答，则 answer_prompt_version 和 answer_prompt_text 都应为空。
+```
 
 ---
 
@@ -713,7 +942,7 @@ COMMENT ON COLUMN rag_query_logs.created_at IS '查询创建时间';
 CREATE TABLE rag_query_candidates (
   id BIGSERIAL PRIMARY KEY,
 
-  query_log_id BIGINT NOT NULL REFERENCES rag_query_logs(id) ON DELETE CASCADE,
+  query_log_id BIGINT NOT NULL,
 
   chunk_id BIGINT,
   parent_chunk_id BIGINT,
@@ -800,7 +1029,7 @@ COMMENT ON COLUMN rag_query_candidates.created_at IS '候选记录创建时间';
 CREATE TABLE rag_feedback (
   id BIGSERIAL PRIMARY KEY,
 
-  query_log_id BIGINT NOT NULL REFERENCES rag_query_logs(id) ON DELETE CASCADE,
+  query_log_id BIGINT NOT NULL,
 
   rating TEXT NOT NULL,
   reason TEXT,
@@ -863,7 +1092,7 @@ OTHER
 CREATE TABLE rag_failure_cases (
   id BIGSERIAL PRIMARY KEY,
 
-  query_log_id BIGINT NOT NULL REFERENCES rag_query_logs(id) ON DELETE CASCADE,
+  query_log_id BIGINT,
 
   source_type TEXT NOT NULL,
   source_ref_id BIGINT,
@@ -885,9 +1114,9 @@ CREATE TABLE rag_failure_cases (
 
 COMMENT ON TABLE rag_failure_cases IS '统一失败案例表，用于沉淀和跟踪 RAG 失败问题';
 COMMENT ON COLUMN rag_failure_cases.id IS '失败案例主键 ID';
-COMMENT ON COLUMN rag_failure_cases.query_log_id IS '关联的查询日志 ID';
+COMMENT ON COLUMN rag_failure_cases.query_log_id IS '关联的查询日志 ID，可为空，日志归档后失败案例仍需保留';
 COMMENT ON COLUMN rag_failure_cases.source_type IS '失败来源，USER_FEEDBACK、MANUAL_DEBUG、EVAL_RUN、AUTO_RULE';
-COMMENT ON COLUMN rag_failure_cases.source_ref_id IS '来源记录 ID，例如 feedback_id 或 eval_result_id';
+COMMENT ON COLUMN rag_failure_cases.source_ref_id IS '来源记录 ID，逻辑外键；USER_FEEDBACK=rag_feedback.id，EVAL_RUN=rag_eval_results.id，MANUAL_DEBUG/AUTO_RULE 通常为空';
 COMMENT ON COLUMN rag_failure_cases.source_reason IS '来源给出的原始原因';
 COMMENT ON COLUMN rag_failure_cases.source_payload IS '来源数据快照，JSON 格式';
 COMMENT ON COLUMN rag_failure_cases.primary_failure_type IS '人工确认后的主要失败类型';
@@ -905,9 +1134,9 @@ COMMENT ON COLUMN rag_failure_cases.fixed_at IS '修复完成时间';
 | 字段                   | 类型        | 说明      |
 | -------------------- | --------- | ------- |
 | id                   | BIGSERIAL | 失败案例 ID |
-| query_log_id         | BIGINT    | 查询日志    |
+| query_log_id         | BIGINT    | 查询日志，可为空 |
 | source_type          | TEXT      | 来源类型    |
-| source_ref_id        | BIGINT    | 来源记录 ID |
+| source_ref_id        | BIGINT    | 来源记录 ID，含义由 source_type 决定 |
 | source_reason        | TEXT      | 来源原因    |
 | source_payload       | JSONB     | 来源快照    |
 | primary_failure_type | TEXT      | 失败类型    |
@@ -922,10 +1151,10 @@ COMMENT ON COLUMN rag_failure_cases.fixed_at IS '修复完成时间';
 source_type 枚举：
 
 ```txt
-USER_FEEDBACK
-MANUAL_DEBUG
-EVAL_RUN
-AUTO_RULE
+USER_FEEDBACK：用户反馈触发，source_ref_id=rag_feedback.id。
+MANUAL_DEBUG：人工调试触发，source_ref_id 通常为空，query_log_id 记录关联查询。
+EVAL_RUN：测试集失败触发，source_ref_id=rag_eval_results.id。
+AUTO_RULE：系统规则触发，source_ref_id 通常为空，规则详情写入 source_payload。
 ```
 
 primary_failure_type 枚举：
@@ -961,7 +1190,9 @@ WONT_FIX
 表用途：
 
 ```txt
-保存固定测试问题。
+保存测试问题。
+自动生成或转入的问题先进入草稿状态。
+只有人工审核通过的 ACTIVE 用例才参与评测。
 用于评估不同切片策略、检索策略、prompt 策略的效果。
 ```
 
@@ -973,23 +1204,51 @@ CREATE TABLE rag_eval_cases (
   expected_answer TEXT,
 
   case_type TEXT NOT NULL DEFAULT 'CORE_RULE',
-  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  status TEXT NOT NULL DEFAULT 'DRAFT',
   priority INT DEFAULT 3,
 
-  created_from TEXT DEFAULT 'MANUAL',
+  created_from TEXT NOT NULL DEFAULT 'MANUAL',
+  source_ref_id BIGINT,
+  source_payload JSONB,
+
+  created_by TEXT,
+  reviewed_by TEXT,
+  review_note TEXT,
+  reviewed_at TIMESTAMP,
+  activated_at TIMESTAMP,
 
   created_at TIMESTAMP DEFAULT now(),
-  updated_at TIMESTAMP DEFAULT now()
+  updated_at TIMESTAMP DEFAULT now(),
+
+  CONSTRAINT chk_rag_eval_cases_status
+    CHECK (status IN ('DRAFT', 'ACTIVE', 'INACTIVE', 'REJECTED')),
+
+  CONSTRAINT chk_rag_eval_cases_created_from
+    CHECK (created_from IN (
+      'MANUAL',
+      'DOCUMENT_GENERATED',
+      'QUERY_LOG',
+      'USER_FEEDBACK',
+      'FAILURE_CASE',
+      'CSV_IMPORT'
+    ))
 );
 
-COMMENT ON TABLE rag_eval_cases IS 'RAG 测试问题集表，用于持续评估检索和回答质量';
+COMMENT ON TABLE rag_eval_cases IS 'RAG 测试问题集表，包含草稿、审核、启用和停用状态';
 COMMENT ON COLUMN rag_eval_cases.id IS '测试用例主键 ID';
-COMMENT ON COLUMN rag_eval_cases.question IS '测试问题';
-COMMENT ON COLUMN rag_eval_cases.expected_answer IS '期望答案，用于人工或自动评估';
+COMMENT ON COLUMN rag_eval_cases.question IS '测试问题，来自人工维护、线上查询或失败案例转入';
+COMMENT ON COLUMN rag_eval_cases.expected_answer IS '期望答案要点，人工根据权威资料填写；可为空，空值表示只评估检索命中';
 COMMENT ON COLUMN rag_eval_cases.case_type IS '测试类型，CORE_RULE、FREQUENT_QUERY、EDGE_CASE、FAILURE_REGRESSION';
-COMMENT ON COLUMN rag_eval_cases.status IS '状态，ACTIVE 表示参与测试，INACTIVE 表示停用';
+COMMENT ON COLUMN rag_eval_cases.status IS '状态，DRAFT 待审核，ACTIVE 参与评测，INACTIVE 停用，REJECTED 拒绝入库';
 COMMENT ON COLUMN rag_eval_cases.priority IS '优先级，1 最高，5 最低';
-COMMENT ON COLUMN rag_eval_cases.created_from IS '来源，MANUAL、USER_FEEDBACK、FAILURE_CASE';
+COMMENT ON COLUMN rag_eval_cases.created_from IS '来源，MANUAL、DOCUMENT_GENERATED、QUERY_LOG、USER_FEEDBACK、FAILURE_CASE、CSV_IMPORT';
+COMMENT ON COLUMN rag_eval_cases.source_ref_id IS '来源记录 ID，逻辑外键；QUERY_LOG=rag_query_logs.id，USER_FEEDBACK=rag_feedback.id，FAILURE_CASE=rag_failure_cases.id，DOCUMENT_GENERATED=rag_chunks.id(PARENT)，MANUAL/CSV_IMPORT 通常为空';
+COMMENT ON COLUMN rag_eval_cases.source_payload IS '来源快照，例如原始 query、failure case、生成依据 chunk、候选答案';
+COMMENT ON COLUMN rag_eval_cases.created_by IS '创建人或导入任务标识，可为空';
+COMMENT ON COLUMN rag_eval_cases.reviewed_by IS '审核人，可为空';
+COMMENT ON COLUMN rag_eval_cases.review_note IS '审核备注或拒绝原因';
+COMMENT ON COLUMN rag_eval_cases.reviewed_at IS '审核时间';
+COMMENT ON COLUMN rag_eval_cases.activated_at IS '首次启用时间';
 COMMENT ON COLUMN rag_eval_cases.created_at IS '创建时间';
 COMMENT ON COLUMN rag_eval_cases.updated_at IS '更新时间';
 ```
@@ -999,12 +1258,19 @@ COMMENT ON COLUMN rag_eval_cases.updated_at IS '更新时间';
 | 字段              | 类型        | 说明      |
 | --------------- | --------- | ------- |
 | id              | BIGSERIAL | 测试用例 ID |
-| question        | TEXT      | 测试问题    |
-| expected_answer | TEXT      | 期望答案    |
+| question        | TEXT      | 测试问题，来自人工维护、线上查询或失败案例转入 |
+| expected_answer | TEXT      | 期望答案要点，人工根据权威资料填写，可为空 |
 | case_type       | TEXT      | 用例类型    |
 | status          | TEXT      | 状态      |
 | priority        | INT       | 优先级     |
 | created_from    | TEXT      | 创建来源    |
+| source_ref_id   | BIGINT    | 来源记录 ID，含义由 created_from 决定，见下方对照表 |
+| source_payload  | JSONB     | 来源快照    |
+| created_by      | TEXT      | 创建人或任务 |
+| reviewed_by     | TEXT      | 审核人     |
+| review_note     | TEXT      | 审核备注    |
+| reviewed_at     | TIMESTAMP | 审核时间    |
+| activated_at    | TIMESTAMP | 首次启用时间 |
 | created_at      | TIMESTAMP | 创建时间    |
 | updated_at      | TIMESTAMP | 更新时间    |
 
@@ -1015,6 +1281,66 @@ CORE_RULE
 FREQUENT_QUERY
 EDGE_CASE
 FAILURE_REGRESSION
+```
+
+created_from 枚举：
+
+```txt
+MANUAL：人工直接录入，source_ref_id 为空。
+QUERY_LOG：从线上查询日志转入，source_ref_id=rag_query_logs.id。
+USER_FEEDBACK：从用户反馈转入，source_ref_id=rag_feedback.id。
+FAILURE_CASE：从失败案例转入，source_ref_id=rag_failure_cases.id。
+CSV_IMPORT：通过 CSV/JSON 批量导入，source_ref_id 为空。
+DOCUMENT_GENERATED：从文档版本或父 chunk 自动生成候选问题，source_ref_id=rag_chunks.id，且该 chunk 应为 PARENT。
+```
+
+source_ref_id 对照：
+
+| created_from       | source_ref_id 含义             | 说明 |
+| ------------------ | ---------------------------- | ---- |
+| MANUAL             | NULL                         | 人工直接创建，没有上游记录 |
+| QUERY_LOG          | rag_query_logs.id            | 从某次查询日志转成测试用例草稿 |
+| USER_FEEDBACK      | rag_feedback.id              | 从某条用户反馈转成测试用例草稿 |
+| FAILURE_CASE       | rag_failure_cases.id         | 从某个失败案例转成回归测试草稿 |
+| CSV_IMPORT         | NULL                         | MVP 不设计导入任务表，导入批次信息放 source_payload |
+| DOCUMENT_GENERATED | rag_chunks.id                | 指生成依据的 PARENT chunk；如果不是按单个 chunk 生成，则为空，详情放 source_payload |
+
+status 枚举：
+
+```txt
+DRAFT：草稿，自动生成、失败案例转入、线上问题转入后默认状态，不参与评测。
+ACTIVE：审核通过，正式参与评测。
+INACTIVE：曾经启用过，后来停用，不参与评测。
+REJECTED：候选被拒绝，不参与评测。
+```
+
+question 来源：
+
+```txt
+question 不是从文档自动稳定生成的字段。
+MVP 阶段主要来自人工维护，也可以从 rag_query_logs、用户反馈、rag_failure_cases 中挑选后转入。
+从线上数据转入时，可以先复制原始用户问题，再由人工改写成稳定、可重复评测的问题。
+从文档自动生成时，只生成 DRAFT 候选，不直接参与评测。
+```
+
+expected_answer 来源：
+
+```txt
+expected_answer 是人工根据权威文档整理的期望答案要点，不是线上 LLM 的回答。
+它用于评估最终回答是否覆盖关键事实，不要求和模型输出逐字一致。
+如果该用例只评估检索效果，可以不填 expected_answer，只维护 expected_sources。
+当 use_llm=true 且 expected_answer 不为空时，才参与回答质量评估。
+```
+
+录入方式：
+
+```txt
+1. 人工在后台页面或通过 POST /api/v1/rag/eval-cases 创建 DRAFT。
+2. 从 query log 详情页转入 DRAFT：默认带入 rag_query_logs.question，人工补充 expected_answer 和 expected_sources。
+3. 从 failure case 转入 DRAFT：用于回归测试，修复后持续验证同类问题不再失败。
+4. 从文档章节或 parent chunk 自动生成 DRAFT：系统起草 question、expected_answer 和 expected_sources。
+5. 批量导入 CSV/JSON：导入后仍建议人工校对 expected_answer 和 expected_sources。
+6. 人工审核通过后 status 改为 ACTIVE，才参与测试集运行。
 ```
 
 ---
@@ -1033,13 +1359,13 @@ FAILURE_REGRESSION
 CREATE TABLE rag_eval_expected_sources (
   id BIGSERIAL PRIMARY KEY,
 
-  eval_case_id BIGINT NOT NULL REFERENCES rag_eval_cases(id) ON DELETE CASCADE,
+  eval_case_id BIGINT NOT NULL,
 
   document_id BIGINT,
   document_version_id BIGINT,
 
   expected_section_title TEXT,
-  expected_keywords TEXT,
+  expected_keywords TEXT[],
 
   expected_chunk_id BIGINT,
 
@@ -1052,7 +1378,7 @@ COMMENT ON COLUMN rag_eval_expected_sources.eval_case_id IS '所属测试用例 
 COMMENT ON COLUMN rag_eval_expected_sources.document_id IS '期望命中的文档 ID';
 COMMENT ON COLUMN rag_eval_expected_sources.document_version_id IS '期望命中的文档版本 ID，可为空';
 COMMENT ON COLUMN rag_eval_expected_sources.expected_section_title IS '期望命中的章节标题';
-COMMENT ON COLUMN rag_eval_expected_sources.expected_keywords IS '期望命中的关键词，多个关键词可用逗号分隔';
+COMMENT ON COLUMN rag_eval_expected_sources.expected_keywords IS '期望命中的关键词数组';
 COMMENT ON COLUMN rag_eval_expected_sources.expected_chunk_id IS '期望命中的 chunk ID，可选，不建议强依赖';
 COMMENT ON COLUMN rag_eval_expected_sources.created_at IS '创建时间';
 ```
@@ -1066,7 +1392,7 @@ COMMENT ON COLUMN rag_eval_expected_sources.created_at IS '创建时间';
 | document_id            | BIGINT    | 期望文档     |
 | document_version_id    | BIGINT    | 期望版本     |
 | expected_section_title | TEXT      | 期望章节     |
-| expected_keywords      | TEXT      | 期望关键词    |
+| expected_keywords      | TEXT[]    | 期望关键词    |
 | expected_chunk_id      | BIGINT    | 期望 chunk |
 | created_at             | TIMESTAMP | 创建时间     |
 
@@ -1088,31 +1414,44 @@ CREATE TABLE rag_eval_runs (
   name TEXT,
 
   search_profile_id BIGINT,
+  search_profile_snapshot JSONB,
 
   search_mode TEXT,
   chunk_strategy TEXT,
   embedding_model TEXT,
   llm_model TEXT,
+  use_llm BOOLEAN NOT NULL DEFAULT false,
+  run_status TEXT NOT NULL DEFAULT 'RUNNING',
+  eval_config JSONB,
 
   total_cases INT DEFAULT 0,
   passed_cases INT DEFAULT 0,
   failed_cases INT DEFAULT 0,
 
-  created_at TIMESTAMP DEFAULT now()
+  created_at TIMESTAMP DEFAULT now(),
+  finished_at TIMESTAMP,
+
+  CONSTRAINT chk_rag_eval_runs_status
+    CHECK (run_status IN ('RUNNING', 'COMPLETED', 'FAILED'))
 );
 
 COMMENT ON TABLE rag_eval_runs IS '测试集运行记录表，保存一次评估运行的整体结果';
 COMMENT ON COLUMN rag_eval_runs.id IS '评估运行主键 ID';
 COMMENT ON COLUMN rag_eval_runs.name IS '评估运行名称';
 COMMENT ON COLUMN rag_eval_runs.search_profile_id IS '使用的搜索配置 ID';
+COMMENT ON COLUMN rag_eval_runs.search_profile_snapshot IS '运行时搜索配置快照';
 COMMENT ON COLUMN rag_eval_runs.search_mode IS '检索模式';
 COMMENT ON COLUMN rag_eval_runs.chunk_strategy IS 'chunk 策略说明';
 COMMENT ON COLUMN rag_eval_runs.embedding_model IS 'embedding 模型';
 COMMENT ON COLUMN rag_eval_runs.llm_model IS 'LLM 模型';
+COMMENT ON COLUMN rag_eval_runs.use_llm IS '本次评估是否调用 LLM';
+COMMENT ON COLUMN rag_eval_runs.run_status IS '运行状态，RUNNING、COMPLETED、FAILED';
+COMMENT ON COLUMN rag_eval_runs.eval_config IS '评估规则快照，例如通过标准、answer judge 类型';
 COMMENT ON COLUMN rag_eval_runs.total_cases IS '总测试用例数';
 COMMENT ON COLUMN rag_eval_runs.passed_cases IS '通过数量';
 COMMENT ON COLUMN rag_eval_runs.failed_cases IS '失败数量';
 COMMENT ON COLUMN rag_eval_runs.created_at IS '创建时间';
+COMMENT ON COLUMN rag_eval_runs.finished_at IS '运行结束时间';
 ```
 
 字段说明：
@@ -1122,14 +1461,19 @@ COMMENT ON COLUMN rag_eval_runs.created_at IS '创建时间';
 | id                | BIGSERIAL | 运行 ID        |
 | name              | TEXT      | 运行名称         |
 | search_profile_id | BIGINT    | 搜索配置         |
+| search_profile_snapshot | JSONB | 搜索配置快照      |
 | search_mode       | TEXT      | 检索模式         |
 | chunk_strategy    | TEXT      | chunk 策略     |
 | embedding_model   | TEXT      | embedding 模型 |
 | llm_model         | TEXT      | LLM 模型       |
+| use_llm           | BOOLEAN   | 是否调用 LLM     |
+| run_status        | TEXT      | 运行状态         |
+| eval_config       | JSONB     | 评估配置快照       |
 | total_cases       | INT       | 总数           |
 | passed_cases      | INT       | 通过数          |
 | failed_cases      | INT       | 失败数          |
 | created_at        | TIMESTAMP | 创建时间         |
+| finished_at       | TIMESTAMP | 结束时间         |
 
 ---
 
@@ -1146,16 +1490,20 @@ COMMENT ON COLUMN rag_eval_runs.created_at IS '创建时间';
 CREATE TABLE rag_eval_results (
   id BIGSERIAL PRIMARY KEY,
 
-  eval_run_id BIGINT NOT NULL REFERENCES rag_eval_runs(id) ON DELETE CASCADE,
-  eval_case_id BIGINT NOT NULL REFERENCES rag_eval_cases(id) ON DELETE CASCADE,
-  query_log_id BIGINT REFERENCES rag_query_logs(id) ON DELETE SET NULL,
+  eval_run_id BIGINT NOT NULL,
+  eval_case_id BIGINT NOT NULL,
+  query_log_id BIGINT,
 
   top1_hit BOOLEAN DEFAULT false,
   top5_hit BOOLEAN DEFAULT false,
-  answer_pass BOOLEAN DEFAULT false,
+  retrieval_pass BOOLEAN DEFAULT false,
+  answer_pass BOOLEAN,
+  answer_score FLOAT,
+  answer_eval_detail JSONB,
 
   failure_reason TEXT,
   failure_created BOOLEAN DEFAULT false,
+  failure_case_id BIGINT,
 
   created_at TIMESTAMP DEFAULT now()
 );
@@ -1167,9 +1515,13 @@ COMMENT ON COLUMN rag_eval_results.eval_case_id IS '所属测试用例 ID';
 COMMENT ON COLUMN rag_eval_results.query_log_id IS '本次测试对应的查询日志 ID';
 COMMENT ON COLUMN rag_eval_results.top1_hit IS '期望来源是否命中 Top 1';
 COMMENT ON COLUMN rag_eval_results.top5_hit IS '期望来源是否命中 Top 5';
-COMMENT ON COLUMN rag_eval_results.answer_pass IS '回答是否通过评估';
+COMMENT ON COLUMN rag_eval_results.retrieval_pass IS '检索是否通过评估';
+COMMENT ON COLUMN rag_eval_results.answer_pass IS '回答是否通过评估，未启用 LLM 或无 expected_answer 时可为空';
+COMMENT ON COLUMN rag_eval_results.answer_score IS '回答质量评分，可由规则或 LLM judge 生成';
+COMMENT ON COLUMN rag_eval_results.answer_eval_detail IS '回答评估详情快照';
 COMMENT ON COLUMN rag_eval_results.failure_reason IS '失败原因';
 COMMENT ON COLUMN rag_eval_results.failure_created IS '是否已生成失败案例';
+COMMENT ON COLUMN rag_eval_results.failure_case_id IS '关联生成的失败案例 ID';
 COMMENT ON COLUMN rag_eval_results.created_at IS '创建时间';
 ```
 
@@ -1183,9 +1535,13 @@ COMMENT ON COLUMN rag_eval_results.created_at IS '创建时间';
 | query_log_id    | BIGINT    | 查询日志     |
 | top1_hit        | BOOLEAN   | Top1 命中  |
 | top5_hit        | BOOLEAN   | Top5 命中  |
+| retrieval_pass  | BOOLEAN   | 检索通过     |
 | answer_pass     | BOOLEAN   | 回答通过     |
+| answer_score    | FLOAT     | 回答评分     |
+| answer_eval_detail | JSONB  | 回答评估详情   |
 | failure_reason  | TEXT      | 失败原因     |
 | failure_created | BOOLEAN   | 是否生成失败案例 |
+| failure_case_id | BIGINT    | 失败案例 ID   |
 | created_at      | TIMESTAMP | 创建时间     |
 
 ---
@@ -1222,7 +1578,25 @@ CREATE TABLE rag_search_profiles (
   is_default BOOLEAN DEFAULT false,
 
   created_at TIMESTAMP DEFAULT now(),
-  updated_at TIMESTAMP DEFAULT now()
+  updated_at TIMESTAMP DEFAULT now(),
+
+  CONSTRAINT chk_rag_search_profiles_mode
+    CHECK (search_mode IN ('VECTOR', 'KEYWORD', 'TRIGRAM', 'HYBRID')),
+  CONSTRAINT chk_rag_search_profiles_top_k
+    CHECK (
+      vector_top_k >= 0
+      AND keyword_top_k >= 0
+      AND trgm_top_k >= 0
+      AND final_top_k > 0
+    ),
+  CONSTRAINT chk_rag_search_profiles_weights
+    CHECK (
+      vector_weight >= 0
+      AND keyword_weight >= 0
+      AND trgm_weight >= 0
+    ),
+  CONSTRAINT chk_rag_search_profiles_min_score
+    CHECK (min_final_score >= 0 AND min_final_score <= 1)
 );
 
 COMMENT ON TABLE rag_search_profiles IS '搜索配置表，用于配置混合检索权重、top_k、阈值等参数';
@@ -1262,6 +1636,21 @@ COMMENT ON COLUMN rag_search_profiles.updated_at IS '更新时间';
 | is_default      | BOOLEAN   | 是否默认   |
 | created_at      | TIMESTAMP | 创建时间   |
 | updated_at      | TIMESTAMP | 更新时间   |
+
+索引与默认配置约束：
+
+```sql
+CREATE UNIQUE INDEX uq_rag_search_profiles_default
+ON rag_search_profiles(is_default)
+WHERE is_default = true;
+```
+
+说明：
+
+```txt
+同一时间只允许一个默认搜索配置。
+权重可以不强制相加等于 1，但服务层应在使用时归一化，避免配置错误影响分数。
+```
 
 ---
 
@@ -1404,6 +1793,7 @@ GET /api/v1/documents/{document_id}/chunks?version=current&chunk_type=CHILD
       "chunk_type": "CHILD",
       "parent_chunk_id": 3,
       "chunk_index": 1,
+      "child_index": 0,
       "section_title": "差旅报销",
       "content": "差旅报销需要提供发票、行程单、审批记录。"
     }
@@ -1475,7 +1865,7 @@ use_llm=true 时，返回检索结果、prompt、LLM 回答。
     "used": true,
     "prompt": "你是一个知识库问答助手……",
     "answer": "差旅报销需要提供发票、行程单、审批记录。",
-    "model": "gpt-4.1-mini",
+    "model": "zhipu-configured-model",
     "latency_ms": 2300,
     "error": null
   }
@@ -1640,6 +2030,18 @@ PATCH /api/v1/rag/failure-cases/{failure_case_id}
 GET /api/v1/rag/eval-cases
 ```
 
+查询参数：
+
+```txt
+status
+created_from
+case_type
+priority
+needs_review
+page
+page_size
+```
+
 ---
 
 ## 7.15 创建测试用例
@@ -1655,19 +2057,190 @@ POST /api/v1/rag/eval-cases
   "question": "差旅报销需要什么材料？",
   "expected_answer": "需要发票、行程单、审批记录。",
   "case_type": "CORE_RULE",
+  "status": "DRAFT",
+  "priority": 1,
+  "created_from": "MANUAL",
+  "source_ref_id": null,
+  "source_payload": null,
   "expected_sources": [
     {
       "document_id": 1,
       "expected_section_title": "差旅报销",
-      "expected_keywords": "发票,行程单,审批记录"
+      "expected_keywords": ["发票", "行程单", "审批记录"]
     }
   ]
 }
 ```
 
+说明：
+
+```txt
+question 由人工录入，或者从 query log / failure case 转入后人工确认。
+expected_answer 由人工根据权威文档填写答案要点，不直接使用线上 LLM 回答。
+如果只做检索评估，expected_answer 可以为空，但应填写 expected_sources。
+创建接口默认只创建 DRAFT，不直接进入 ACTIVE。
+created_from=MANUAL 时 source_ref_id 可以为空。
+从 query log 转入时 created_from=QUERY_LOG，source_ref_id=rag_query_logs.id。
+从 failure case 转入时 created_from=FAILURE_CASE，source_ref_id=rag_failure_cases.id。
+```
+
 ---
 
-## 7.16 运行测试集
+## 7.16 更新测试用例
+
+```http
+PATCH /api/v1/rag/eval-cases/{eval_case_id}
+```
+
+请求：
+
+```json
+{
+  "question": "差旅报销需要什么材料？",
+  "expected_answer": "需要发票、行程单、审批记录。",
+  "case_type": "CORE_RULE",
+  "status": "DRAFT",
+  "priority": 1,
+  "created_from": "MANUAL",
+  "source_ref_id": null,
+  "source_payload": null,
+  "expected_sources": [
+    {
+      "document_id": 1,
+      "expected_section_title": "差旅报销",
+      "expected_keywords": ["发票", "行程单", "审批记录"]
+    }
+  ]
+}
+```
+
+说明：
+
+```txt
+更新 expected_sources 时建议整体替换该 case 的期望来源列表。
+编辑 DRAFT 时可以修改 question、expected_answer、expected_sources。
+ACTIVE 用例原则上不直接改标准答案，建议复制为新 DRAFT 或先停用旧用例。
+停用用例时只修改 status=INACTIVE，不直接删除历史用例。
+```
+
+---
+
+## 7.17 从查询日志创建测试用例草稿
+
+```http
+POST /api/v1/rag/query-logs/{query_log_id}/eval-case-draft
+```
+
+请求：
+
+```json
+{
+  "case_type": "FREQUENT_QUERY",
+  "priority": 3
+}
+```
+
+说明：
+
+```txt
+该接口只创建 DRAFT。
+默认带入 rag_query_logs.question。
+expected_answer 和 expected_sources 需要人工补充或确认。
+created_from=QUERY_LOG。
+source_ref_id=rag_query_logs.id。
+source_payload 保存原始 query、检索摘要、回答摘要和用户反馈摘要。
+```
+
+---
+
+## 7.18 从失败案例创建测试用例草稿
+
+```http
+POST /api/v1/rag/failure-cases/{failure_case_id}/eval-case-draft
+```
+
+请求：
+
+```json
+{
+  "question": "差旅报销需要什么材料？",
+  "case_type": "FAILURE_REGRESSION",
+  "priority": 2
+}
+```
+
+说明：
+
+```txt
+该接口只创建 DRAFT。
+用于把已确认的问题沉淀为回归测试。
+如果 failure case 关联了 query_log，则默认带入 query_log.question。
+如果 failure case 没有关联 query_log，则请求体必须提供 question。
+expected_answer 和 expected_sources 必须人工补充或确认。
+created_from=FAILURE_CASE。
+source_ref_id=rag_failure_cases.id。
+source_payload 保存失败类型、失败原因、分析备注和修复计划。
+```
+
+---
+
+## 7.19 从文档生成测试用例草稿
+
+```http
+POST /api/v1/rag/document-versions/{document_version_id}/eval-case-drafts
+```
+
+请求：
+
+```json
+{
+  "case_type": "CORE_RULE",
+  "max_cases_per_parent_chunk": 2,
+  "priority": 3
+}
+```
+
+说明：
+
+```txt
+该接口只生成 DRAFT 候选。
+系统可以基于 PARENT chunk 起草 question、expected_answer 和 expected_sources。
+expected_answer 必须能回到原文依据，不能直接信任生成结果。
+人工审核时需要确认问题稳定、答案要点正确、expected_sources 可用于检索命中判断。
+created_from=DOCUMENT_GENERATED。
+source_ref_id=rag_chunks.id，且该 chunk 应为 PARENT；如果一次生成多个 chunk 的候选，则详细来源写入 source_payload。
+```
+
+---
+
+## 7.20 审核测试用例
+
+```http
+POST /api/v1/rag/eval-cases/{eval_case_id}/review
+```
+
+请求：
+
+```json
+{
+  "action": "APPROVE",
+  "review_note": "答案要点和来源已核对",
+  "reviewed_by": "admin"
+}
+```
+
+说明：
+
+```txt
+action=APPROVE 时，status 改为 ACTIVE，写入 reviewed_by、reviewed_at、activated_at。
+action=REJECT 时，status 改为 REJECTED，review_note 必填。
+审核通过前必须确认 question、expected_answer、expected_sources。
+如果 expected_answer 为空，则表示该用例只做检索评估，但 expected_sources 必须存在。
+```
+
+---
+
+## 7.21 运行测试集
 
 ```http
 POST /api/v1/rag/eval-runs
@@ -1688,6 +2261,7 @@ POST /api/v1/rag/eval-runs
 ```json
 {
   "eval_run_id": 10,
+  "run_status": "COMPLETED",
   "total_cases": 20,
   "passed_cases": 16,
   "failed_cases": 4
@@ -1696,7 +2270,79 @@ POST /api/v1/rag/eval-runs
 
 ---
 
-## 7.17 搜索配置列表
+## 7.22 测试运行列表
+
+```http
+GET /api/v1/rag/eval-runs
+```
+
+查询参数：
+
+```txt
+start_date
+end_date
+search_profile_id
+use_llm
+page
+page_size
+```
+
+响应：
+
+```json
+{
+  "items": [
+    {
+      "id": 10,
+      "name": "调整混合检索权重后的测试",
+      "run_status": "COMPLETED",
+      "total_cases": 20,
+      "passed_cases": 16,
+      "failed_cases": 4,
+      "created_at": "2026-06-01T12:00:00",
+      "finished_at": "2026-06-01T12:01:10"
+    }
+  ]
+}
+```
+
+---
+
+## 7.23 测试运行详情
+
+```http
+GET /api/v1/rag/eval-runs/{eval_run_id}
+```
+
+响应：
+
+```json
+{
+  "id": 10,
+  "name": "调整混合检索权重后的测试",
+  "search_profile_snapshot": {},
+  "total_cases": 20,
+  "passed_cases": 16,
+  "failed_cases": 4,
+  "results": [
+    {
+      "eval_case_id": 1,
+      "question": "差旅报销需要什么材料？",
+      "top1_hit": true,
+      "top5_hit": true,
+      "retrieval_pass": true,
+      "answer_pass": true,
+      "failure_reason": null,
+      "query_log_id": 1001,
+      "failure_case_id": null
+    }
+  ]
+}
+```
+
+---
+
+## 7.24 搜索配置列表
 
 ```http
 GET /api/v1/rag/search-profiles
@@ -1704,7 +2350,7 @@ GET /api/v1/rag/search-profiles
 
 ---
 
-## 7.18 创建搜索配置
+## 7.25 创建搜索配置
 
 ```http
 POST /api/v1/rag/search-profiles
@@ -1723,7 +2369,41 @@ POST /api/v1/rag/search-profiles
   "vector_weight": 0.65,
   "keyword_weight": 0.25,
   "trgm_weight": 0.1,
-  "min_final_score": 0.55
+  "min_final_score": 0.55,
+  "is_default": true
+}
+```
+
+---
+
+## 7.26 更新搜索配置
+
+```http
+PATCH /api/v1/rag/search-profiles/{search_profile_id}
+```
+
+请求字段同创建接口，全部可选。
+
+说明：
+
+```txt
+如果修改了历史评估使用过的搜索配置，不影响旧 eval_run 的 search_profile_snapshot。
+设置 is_default=true 时，服务层需要在同一事务内取消其他默认配置，配合唯一索引保证只有一个默认配置。
+```
+
+---
+
+## 7.27 设置默认搜索配置
+
+```http
+POST /api/v1/rag/search-profiles/{search_profile_id}/set-default
+```
+
+响应：
+
+```json
+{
+  "success": true
 }
 ```
 
@@ -1734,7 +2414,7 @@ POST /api/v1/rag/search-profiles
 ## 8.1 入库主流程
 
 ```python
-async def ingest_document(file, document_id=None):
+async def ingest_document(file, db, document_id=None):
     file_bytes = await file.read()
     file_hash = sha256(file_bytes)
 
@@ -1753,44 +2433,61 @@ async def ingest_document(file, document_id=None):
         document_id=document.id,
         version_no=version_no,
         file_hash=file_hash,
+        original_filename=file.filename,
+        parser_version=document_parser.version,
+        parser_config_snapshot=document_parser.config_snapshot(),
+        chunk_strategy_name=chunker.strategy_name,
+        chunk_config_snapshot=chunker.config_snapshot(),
         status="PROCESSING",
     )
 
     try:
         blocks = document_parser.parse(file.filename, file_bytes)
 
-        chunks = chunker.build_parent_child_chunks(
+        chunk_groups = chunker.build_parent_child_chunks(
             document=document,
             version=version,
             blocks=blocks,
         )
 
-        for chunk in chunks:
-            if chunk.chunk_type == "CHILD":
-                chunk.embedding = await embedding_service.embed(
-                    chunk.content_with_context
+        for group in chunk_groups:
+            group.parent.search_text = build_search_text(group.parent)
+            group.parent.search_tsv = build_search_tsv(group.parent.search_text)
+
+            for child in group.children:
+                child.embedding = await embedding_service.embed(
+                    child.content_with_context
                 )
+                child.search_text = build_search_text(child)
+                child.search_tsv = build_search_tsv(child.search_text)
 
-            chunk.search_text = build_search_text(chunk)
-            chunk.search_tsv = build_search_tsv(chunk.search_text)
+        created_chunk_count = 0
 
-            chunk_repo.create(chunk)
+        with db.transaction():
+            for group in chunk_groups:
+                parent = chunk_repo.create(group.parent)
+                created_chunk_count += 1
 
-        document_repo.mark_version_completed(
-            version_id=version.id,
-            chunk_count=len(chunks),
-        )
+                for child in group.children:
+                    child.parent_chunk_id = parent.id
+                    chunk_repo.create(child)
+                    created_chunk_count += 1
 
-        document_repo.set_current_version(
-            document_id=document.id,
-            version_id=version.id,
-        )
+            document_repo.mark_version_completed(
+                version_id=version.id,
+                chunk_count=created_chunk_count,
+            )
+
+            document_repo.set_current_version(
+                document_id=document.id,
+                version_id=version.id,
+            )
 
         return {
             "document_id": document.id,
             "version_id": version.id,
             "status": "COMPLETED",
-            "chunk_count": len(chunks),
+            "chunk_count": created_chunk_count,
         }
 
     except Exception as exc:
@@ -1798,6 +2495,7 @@ async def ingest_document(file, document_id=None):
             version_id=version.id,
             error_message=str(exc),
         )
+        chunk_repo.delete_by_version(version.id)
         raise
 ```
 
@@ -1806,6 +2504,8 @@ async def ingest_document(file, document_id=None):
 ```txt
 新版本全部处理成功后，才切换 current_version_id。
 处理失败时，旧版本仍然可用。
+不要在长事务里等待外部 embedding API；先完成解析和向量生成，再用短事务写入 chunks、标记版本完成、切换 current_version_id。
+如果处理失败，需要清理该失败版本已写入的临时 chunks，或保证正常检索永远只过滤 current_version_id。
 ```
 
 ---
@@ -1883,10 +2583,16 @@ child_overlap = 60 ~ 100 中文字
 ## 9.4 Chunker 伪代码
 
 ```python
+@dataclass
+class ChunkGroup:
+    parent: RagChunkCreate
+    children: list[RagChunkCreate]
+
+
 def build_parent_child_chunks(document, version, blocks):
     sections = split_blocks_by_heading(blocks)
 
-    all_chunks = []
+    chunk_groups = []
     parent_index = 0
     child_global_index = 0
 
@@ -1908,17 +2614,10 @@ def build_parent_child_chunks(document, version, blocks):
                 page_start=section.page_start,
                 page_end=section.page_end,
                 content=parent_text,
-                content_with_context=build_context_text(
-                    document_name=document.name,
-                    heading_path=section.heading_path,
-                    page_start=section.page_start,
-                    content=parent_text,
-                ),
+                content_with_context=None,
                 content_hash=hash_text(parent_text),
                 token_count=estimate_tokens(parent_text),
             )
-
-            all_chunks.append(parent_chunk)
 
             child_texts = split_with_overlap(
                 parent_text,
@@ -1926,13 +2625,16 @@ def build_parent_child_chunks(document, version, blocks):
                 overlap=80,
             )
 
-            for child_text in child_texts:
+            children = []
+
+            for child_index, child_text in enumerate(child_texts):
                 child_chunk = RagChunkCreate(
                     document_id=document.id,
                     document_version_id=version.id,
-                    parent_chunk_id="TEMP_PARENT_REF",
+                    parent_chunk_id=None,
                     chunk_type="CHILD",
                     chunk_index=child_global_index,
+                    child_index=child_index,
                     section_title=section.title,
                     heading_path=section.heading_path,
                     page_start=section.page_start,
@@ -1948,12 +2650,26 @@ def build_parent_child_chunks(document, version, blocks):
                     token_count=estimate_tokens(child_text),
                 )
 
-                all_chunks.append(child_chunk)
+                children.append(child_chunk)
                 child_global_index += 1
 
+            chunk_groups.append(
+                ChunkGroup(
+                    parent=parent_chunk,
+                    children=children,
+                )
+            )
             parent_index += 1
 
-    return all_chunks
+    return chunk_groups
+```
+
+说明：
+
+```txt
+chunker 不生成临时 parent_chunk_id。
+parent_chunk_id 只能在 parent chunk 落库拿到真实 ID 后回填。
+写入 child 前，repo 层必须校验 parent_chunk_id 指向同一 document_version 下的 PARENT 行。
 ```
 
 ---
@@ -2006,6 +2722,13 @@ ORDER BY keyword_score DESC
 LIMIT :keyword_top_k;
 ```
 
+中文检索说明：
+
+```txt
+plainto_tsquery('simple', :query) 对中文没有真正分词能力。
+如果知识库以中文为主，MVP 可以先把全文检索作为辅助召回；正式版本应接入中文分词方案，例如 pg_jieba、外部分词后写入 search_tsv，或使用关键词抽取结果构造 tsquery。
+```
+
 ---
 
 ## 10.3 模糊检索 SQL
@@ -2035,10 +2758,27 @@ LIMIT :trgm_top_k;
 ## 10.4 分数融合
 
 ```python
-def hybrid_search(question, query_embedding, profile):
-    vector_rows = vector_search(question, query_embedding, profile.vector_top_k)
-    keyword_rows = keyword_search(question, profile.keyword_top_k)
-    trgm_rows = trigram_search(question, profile.trgm_top_k)
+def rrf(rank, k=60):
+    return 1 / (k + rank)
+
+
+def search(question, query_embedding, profile):
+    vector_rows = []
+    keyword_rows = []
+    trgm_rows = []
+
+    if profile.search_mode in ("VECTOR", "HYBRID"):
+        vector_rows = vector_search(
+            question,
+            query_embedding,
+            profile.vector_top_k,
+        )
+
+    if profile.search_mode in ("KEYWORD", "HYBRID"):
+        keyword_rows = keyword_search(question, profile.keyword_top_k)
+
+    if profile.search_mode in ("TRIGRAM", "HYBRID"):
+        trgm_rows = trigram_search(question, profile.trgm_top_k)
 
     candidates = {}
 
@@ -2047,32 +2787,49 @@ def hybrid_search(question, query_embedding, profile):
         candidates.setdefault(cid, row_to_candidate(row))
         candidates[cid].vector_score = row.vector_score
         candidates[cid].vector_rank = rank
+        candidates[cid].raw_fusion_score += profile.vector_weight * rrf(rank)
 
     for rank, row in enumerate(keyword_rows, start=1):
         cid = row.chunk_id
         candidates.setdefault(cid, row_to_candidate(row))
-        candidates[cid].keyword_score = normalize_keyword_score(row.keyword_score)
+        candidates[cid].keyword_score = row.keyword_score
         candidates[cid].keyword_rank = rank
+        candidates[cid].raw_fusion_score += profile.keyword_weight * rrf(rank)
 
     for rank, row in enumerate(trgm_rows, start=1):
         cid = row.chunk_id
         candidates.setdefault(cid, row_to_candidate(row))
         candidates[cid].trgm_score = row.trgm_score
         candidates[cid].trgm_rank = rank
+        candidates[cid].raw_fusion_score += profile.trgm_weight * rrf(rank)
 
     result = []
+    max_raw_score = max(
+        [c.raw_fusion_score for c in candidates.values()],
+        default=0,
+    )
 
     for candidate in candidates.values():
         candidate.final_score = (
-            profile.vector_weight * candidate.vector_score +
-            profile.keyword_weight * candidate.keyword_score +
-            profile.trgm_weight * candidate.trgm_score
+            candidate.raw_fusion_score / max_raw_score
+            if max_raw_score > 0
+            else 0
         )
         result.append(candidate)
 
     result.sort(key=lambda x: x.final_score, reverse=True)
 
     return result
+```
+
+说明：
+
+```txt
+不要直接把 vector_score、ts_rank_cd、trgm_score 相加。
+三种分数分布不同，直接加权会导致 min_final_score 没有稳定含义。
+MVP 建议使用 RRF 这类 rank fusion，再把最终分归一化到 0~1，便于统一阈值。
+如果只选择 KEYWORD 或 TRIGRAM 模式，不应生成 query embedding。
+row_to_candidate 需要把 raw_fusion_score 初始化为 0，并把缺失的各路分数按 0 或 null 明确保存，避免 None 参与计算。
 ```
 
 ---
@@ -2113,8 +2870,71 @@ def select_final_chunks(candidates, final_top_k, min_final_score):
 
 # 11. Prompt 构建方案
 
+MVP 提示词策略：
+
+```txt
+MVP 阶段不单独设计提示词表。
+当前系统只落地一种提示词：RAG_QA 主回答提示词。
+主回答 prompt 版本由代码里的常量维护，例如 ANSWER_PROMPT_VERSION = "rag_qa_v1"。
+rag_query_logs.answer_prompt_version 只表示本次生成最终回答使用的主回答 prompt 版本，不表示所有提示词的统一版本。
+rag_query_logs.answer_prompt_text 保存本次实际渲染后发送给 LLM 的完整主回答 prompt 快照。
+```
+
+版本维护规则：
+
+```txt
+只要修改会影响回答行为的主回答 prompt，就升级 answer_prompt_version。
+例如修改拒答规则、引用格式、回答结构、context 拼接方式、资料排序方式，都应从 rag_qa_v1 升级到 rag_qa_v2。
+不要让同一个版本标签对应多套不同的提示词逻辑。
+```
+
+暂不设计提示词表的原因：
+
+```txt
+当前只有主回答 prompt 一种已落地场景。
+提示词由代码维护，更简单，也便于和 prompt_builder 的代码变更一起发布。
+query log 已保存 answer_prompt_text 快照，足够支持调试和历史复现。
+```
+
+后续扩展条件：
+
+```txt
+当系统需要多 Agent、多用途提示词、后台编辑、A/B test、灰度发布、回滚、非开发人员维护提示词时，再新增 rag_prompt_templates 和 rag_prompt_runs。
+```
+
+未来可扩展的提示词类型：
+
+```txt
+RAG_QA：主回答提示词
+QUERY_REWRITE：查询改写提示词
+ANSWER_JUDGE：回答评估提示词
+CITATION_CHECK：引用校验提示词
+FAILURE_CLASSIFY：失败原因分类提示词
+```
+
+answer_prompt_version 定义规则和定义位置：
+
+```txt
+answer_prompt_version 的值定义在代码里，不来自数据库表。
+建议命名格式为 rag_qa_v{number}，只用于 RAG_QA 主回答 prompt。
+建议放在 app/services/prompt_builder.py 中，和主回答 prompt 模板代码放在一起维护。
+调用方不直接手写版本号，而是使用 prompt_builder.build_answer_prompt(...) 返回的 version。
+没有实际构建主回答 prompt 时，不写入版本号。
+```
+
 ```python
-def build_prompt(question, selected_parent_chunks):
+@dataclass
+class PromptBuildResult:
+    prompt_type: str
+    version: str
+    text: str
+
+
+ANSWER_PROMPT_TYPE = "RAG_QA"
+ANSWER_PROMPT_VERSION = "rag_qa_v1"
+
+
+def build_answer_prompt(question, selected_parent_chunks):
     context_parts = []
 
     for index, chunk in enumerate(selected_parent_chunks, start=1):
@@ -2130,7 +2950,7 @@ def build_prompt(question, selected_parent_chunks):
 
     context = "\n\n".join(context_parts)
 
-    return f"""
+    prompt_text = f"""
 你是一个知识库问答助手。
 请只根据下面提供的资料回答用户问题。
 
@@ -2148,6 +2968,12 @@ def build_prompt(question, selected_parent_chunks):
 
 请给出回答：
 """.strip()
+
+    return PromptBuildResult(
+        prompt_type=ANSWER_PROMPT_TYPE,
+        version=ANSWER_PROMPT_VERSION,
+        text=prompt_text,
+    )
 ```
 
 ---
@@ -2155,9 +2981,26 @@ def build_prompt(question, selected_parent_chunks):
 # 12. Debug Query 主流程
 
 ```python
+def build_model_config_snapshot(settings, embedding_service, llm_service):
+    return {
+        "embedding": {
+            "provider": settings.embedding_provider,
+            "model": embedding_service.model_name,
+            "dimension": embedding_service.dimension,
+        },
+        "llm": {
+            "provider": settings.llm_provider,
+            "model": llm_service.model_name,
+            "temperature": settings.llm_temperature,
+            "max_tokens": settings.llm_max_tokens,
+        },
+    }
+
+
 async def debug_query(payload, db):
     started_at = now_ms()
 
+    settings = get_settings()
     profile = search_profile_repo.get_or_default(payload.search_profile_id)
 
     query_log = query_log_repo.create(
@@ -2173,7 +3016,10 @@ async def debug_query(payload, db):
         final_top_k=profile.final_top_k,
     )
 
-    query_embedding = await embedding_service.embed(payload.question)
+    query_embedding = None
+
+    if profile.search_mode in ("VECTOR", "HYBRID"):
+        query_embedding = await embedding_service.embed(payload.question)
 
     search_started = now_ms()
 
@@ -2195,6 +3041,20 @@ async def debug_query(payload, db):
 
     search_latency_ms = now_ms() - search_started
 
+    query_log_repo.update_search_result(
+        query_log_id=query_log.id,
+        search_profile_snapshot=profile.to_snapshot(),
+        model_config_snapshot=build_model_config_snapshot(
+            settings=settings,
+            embedding_service=embedding_service,
+            llm_service=llm_service,
+        ),
+        max_score=max([c.final_score for c in candidates], default=None),
+        min_score=min([c.final_score for c in candidates], default=None),
+        search_latency_ms=search_latency_ms,
+        total_latency_ms=now_ms() - started_at,
+    )
+
     query_candidate_repo.save_all(
         query_log_id=query_log.id,
         candidates=candidates,
@@ -2210,22 +3070,26 @@ async def debug_query(payload, db):
         "error": None,
     }
 
-    if payload.use_llm:
-        prompt = prompt_builder.build(
+    should_call_llm = payload.use_llm and bool(selected_parent_chunks)
+
+    if should_call_llm:
+        prompt_result = prompt_builder.build_answer_prompt(
             question=payload.question,
             selected_parent_chunks=selected_parent_chunks,
         )
+        prompt_text = prompt_result.text
 
         llm_started = now_ms()
 
         try:
-            answer = await llm_service.chat(prompt)
+            answer = await llm_service.chat(prompt_text)
 
             llm_latency_ms = now_ms() - llm_started
 
             query_log_repo.update_answer(
                 query_log_id=query_log.id,
-                prompt_text=prompt,
+                answer_prompt_version=prompt_result.version,
+                answer_prompt_text=prompt_text,
                 answer=answer,
                 llm_model=llm_service.model_name,
                 search_latency_ms=search_latency_ms,
@@ -2235,7 +3099,7 @@ async def debug_query(payload, db):
 
             llm_result = {
                 "used": True,
-                "prompt": prompt,
+                "prompt": prompt_text,
                 "answer": answer,
                 "model": llm_service.model_name,
                 "latency_ms": llm_latency_ms,
@@ -2248,20 +3112,44 @@ async def debug_query(payload, db):
                 error=str(exc),
             )
 
-            failure_service.create_auto_failure(
+            create_failure_case(
                 query_log_id=query_log.id,
-                failure_type="LLM_ERROR",
-                detail=str(exc),
+                source_type="AUTO_RULE",
+                source_reason=str(exc),
+                primary_failure_type="LLM_ERROR",
             )
 
             llm_result = {
                 "used": True,
-                "prompt": prompt,
+                "prompt": prompt_text,
                 "answer": None,
                 "model": llm_service.model_name,
                 "latency_ms": None,
                 "error": str(exc),
             }
+
+    elif payload.use_llm:
+        refusal_answer = "根据当前资料无法确定"
+
+        query_log_repo.update_answer(
+            query_log_id=query_log.id,
+            answer_prompt_version=None,
+            answer_prompt_text=None,
+            answer=refusal_answer,
+            llm_model=None,
+            search_latency_ms=search_latency_ms,
+            llm_latency_ms=0,
+            total_latency_ms=now_ms() - started_at,
+        )
+
+        llm_result = {
+            "used": False,
+            "prompt": None,
+            "answer": refusal_answer,
+            "model": None,
+            "latency_ms": 0,
+            "error": None,
+        }
 
     maybe_create_auto_failure_by_score(
         query_log_id=query_log.id,
@@ -2387,15 +3275,183 @@ def maybe_create_auto_failure_by_score(
 
 ---
 
-# 14. 测试集运行方案
+# 14. 测试用例录入与审核流程
+
+核心原则：
+
+```txt
+自动产生的是候选草稿，不是正式测试用例。
+失败案例、线上 query、文档生成结果都只能进入 DRAFT。
+人工审核通过后，status 才能变成 ACTIVE。
+测试集运行只读取 ACTIVE 用例。
+```
+
+从查询日志转入：
+
+```python
+def create_eval_case_draft_from_query_log(query_log_id, case_type, priority):
+    query_log = query_log_repo.get(query_log_id)
+
+    return eval_case_repo.create(
+        question=query_log.question,
+        expected_answer=None,
+        case_type=case_type,
+        status="DRAFT",
+        priority=priority,
+        created_from="QUERY_LOG",
+        source_ref_id=query_log.id,
+        source_payload={
+            "question": query_log.question,
+            "answer": query_log.answer,
+            "search_mode": query_log.search_mode,
+            "max_score": query_log.max_score,
+            "min_score": query_log.min_score,
+        },
+    )
+```
+
+从失败案例转入：
+
+```python
+def create_eval_case_draft_from_failure_case(failure_case_id, question=None):
+    failure = failure_repo.get(failure_case_id)
+    query_log = (
+        query_log_repo.get(failure.query_log_id)
+        if failure.query_log_id
+        else None
+    )
+    draft_question = query_log.question if query_log else question
+
+    if not draft_question:
+        raise ValueError("失败案例没有关联 query_log 时必须手动提供 question")
+
+    return eval_case_repo.create(
+        question=draft_question,
+        expected_answer=None,
+        case_type="FAILURE_REGRESSION",
+        status="DRAFT",
+        priority=failure.priority,
+        created_from="FAILURE_CASE",
+        source_ref_id=failure.id,
+        source_payload={
+            "primary_failure_type": failure.primary_failure_type,
+            "source_reason": failure.source_reason,
+            "analysis_note": failure.analysis_note,
+            "fix_plan": failure.fix_plan,
+        },
+    )
+```
+
+从文档生成候选：
+
+```python
+async def generate_eval_case_drafts_from_document_version(
+    document_version_id,
+    max_cases_per_parent_chunk,
+):
+    parent_chunks = chunk_repo.list_parent_chunks(document_version_id)
+    drafts = []
+
+    for parent_chunk in parent_chunks:
+        candidates = await eval_case_generator.generate(
+            content=parent_chunk.content,
+            heading_path=parent_chunk.heading_path,
+            max_cases=max_cases_per_parent_chunk,
+        )
+
+        for candidate in candidates:
+            draft = eval_case_repo.create(
+                question=candidate.question,
+                expected_answer=candidate.expected_answer,
+                case_type="CORE_RULE",
+                status="DRAFT",
+                priority=3,
+                created_from="DOCUMENT_GENERATED",
+                source_ref_id=parent_chunk.id,
+                source_payload={
+                    "document_version_id": document_version_id,
+                    "parent_chunk_id": parent_chunk.id,
+                    "heading_path": parent_chunk.heading_path,
+                    "generated_expected_keywords": candidate.expected_keywords,
+                },
+            )
+            drafts.append(draft)
+
+    return drafts
+```
+
+人工审核：
+
+```python
+def review_eval_case(eval_case_id, action, reviewer, review_note):
+    case = eval_case_repo.get(eval_case_id)
+
+    if action == "APPROVE":
+        expected_sources = eval_repo.get_expected_sources(case.id)
+
+        if not case.question:
+            raise ValueError("question 不能为空")
+
+        if not expected_sources:
+            raise ValueError("审核通过前必须配置 expected_sources")
+
+        return eval_case_repo.update_review_status(
+            eval_case_id=case.id,
+            status="ACTIVE",
+            reviewed_by=reviewer,
+            review_note=review_note,
+            reviewed_at=now(),
+            activated_at=case.activated_at or now(),
+        )
+
+    if action == "REJECT":
+        if not review_note:
+            raise ValueError("拒绝时必须填写 review_note")
+
+        return eval_case_repo.update_review_status(
+            eval_case_id=case.id,
+            status="REJECTED",
+            reviewed_by=reviewer,
+            review_note=review_note,
+            reviewed_at=now(),
+        )
+
+    raise ValueError("不支持的审核动作")
+```
+
+审核规则：
+
+```txt
+question 必须稳定、可重复，不依赖临时上下文。
+expected_answer 必须来自权威文档，不直接采用线上 LLM 回答。
+expected_sources 必须足够支撑检索命中判断。
+只做检索评估的用例可以不填 expected_answer，但不能缺 expected_sources。
+ACTIVE 用例参与历史评估后，不建议直接修改 question / expected_answer / expected_sources。
+需要调整标准答案时，建议停用旧用例，再创建新的 DRAFT 重新审核。
+```
+
+---
+
+# 15. 测试集运行方案
 
 ```python
 async def run_eval(eval_run_payload):
-    cases = eval_repo.list_active_cases()
+    profile = search_profile_repo.get_or_default(
+        eval_run_payload.search_profile_id
+    )
+    cases = eval_repo.list_cases_by_status(status="ACTIVE")
 
     eval_run = eval_repo.create_run(
         name=eval_run_payload.name,
         search_profile_id=eval_run_payload.search_profile_id,
+        search_profile_snapshot=profile.to_snapshot(),
+        use_llm=eval_run_payload.use_llm,
+        run_status="RUNNING",
+        eval_config={
+            "retrieval_pass": "top5_hit",
+            "answer_pass": "simple_answer_check",
+            "case_pass_when_use_llm": "top5_hit AND answer_pass",
+        },
         total_cases=len(cases),
     )
 
@@ -2421,13 +3477,17 @@ async def run_eval(eval_run_payload):
             expected_sources=expected_sources,
         )
 
-        answer_pass = False
+        retrieval_pass = top5_hit
+        answer_pass = None
+        answer_eval_detail = None
 
-        if eval_run_payload.use_llm:
-            answer_pass = simple_answer_check(
+        if eval_run_payload.use_llm and case.expected_answer:
+            answer_eval = simple_answer_check(
                 answer=result.llm.answer,
                 expected_answer=case.expected_answer,
             )
+            answer_pass = answer_eval.passed
+            answer_eval_detail = answer_eval.to_dict()
 
         eval_result = eval_repo.create_result(
             eval_run_id=eval_run.id,
@@ -2435,26 +3495,54 @@ async def run_eval(eval_run_payload):
             query_log_id=result.query_log_id,
             top1_hit=top1_hit,
             top5_hit=top5_hit,
+            retrieval_pass=retrieval_pass,
             answer_pass=answer_pass,
+            answer_score=answer_eval_detail.get("score") if answer_eval_detail else None,
+            answer_eval_detail=answer_eval_detail,
         )
 
-        if top5_hit:
+        case_pass = (
+            retrieval_pass
+            if not eval_run_payload.use_llm
+            else retrieval_pass and answer_pass is not False
+        )
+
+        if case_pass:
             passed += 1
         else:
             failed += 1
+            failure_type = (
+                "RETRIEVAL_NO_RECALL"
+                if not retrieval_pass
+                else "GENERATION_WRONG"
+            )
+            failure_reason = (
+                "测试集未命中期望来源"
+                if not retrieval_pass
+                else "检索命中但回答未通过评估"
+            )
 
-            create_failure_case(
+            failure = create_failure_case(
                 query_log_id=result.query_log_id,
                 source_type="EVAL_RUN",
                 source_ref_id=eval_result.id,
-                source_reason="测试集未命中期望来源",
-                primary_failure_type="RETRIEVAL_NO_RECALL",
+                source_reason=failure_reason,
+                primary_failure_type=failure_type,
+            )
+
+            eval_repo.mark_result_failed(
+                eval_result_id=eval_result.id,
+                failure_reason=failure_reason,
+                failure_created=True,
+                failure_case_id=failure.id,
             )
 
     eval_repo.update_run_counts(
         eval_run_id=eval_run.id,
         passed_cases=passed,
         failed_cases=failed,
+        run_status="COMPLETED",
+        finished_at=now(),
     )
 
     return eval_run
@@ -2462,9 +3550,9 @@ async def run_eval(eval_run_payload):
 
 ---
 
-# 15. 费用说明
+# 16. 费用说明
 
-## 15.1 Neon
+## 16.1 Neon
 
 MVP 阶段可以先使用 Neon 免费额度。
 
@@ -2480,7 +3568,7 @@ MVP 阶段可以先使用 Neon 免费额度。
 需要注意：
 
 ```txt
-embedding VECTOR(1536) 会占用空间。
+embedding VECTOR(N) 会占用空间，N 必须等于实际 embedding 模型输出维度。
 调试日志和 query_candidates 会持续增长，需要定期清理。
 ```
 
@@ -2495,7 +3583,7 @@ query_logs 可定期归档。
 
 ---
 
-## 15.2 Embedding
+## 16.2 Embedding
 
 如果使用第三方 API，通常按 token 付费。
 
@@ -2510,7 +3598,7 @@ content_hash 相同则不重新生成 embedding。
 
 ---
 
-## 15.3 LLM
+## 16.3 LLM
 
 LLM 回答通常按输入输出 token 收费。
 
@@ -2525,7 +3613,7 @@ parent chunk 不要过大。
 
 ---
 
-# 16. MVP 开发顺序
+# 17. MVP 开发顺序
 
 ## 阶段一：基础入库
 
@@ -2583,16 +3671,17 @@ parent chunk 不要过大。
 1. 用户反馈
 2. 失败案例
 3. 人工分类
-4. 测试集
-5. eval run
-6. 质量看板
+4. 测试用例草稿生成
+5. 测试用例人工审核
+6. eval run
+7. 质量看板
 ```
 
 ---
 
-# 17. 后端验收标准
+# 18. 后端验收标准
 
-## 17.1 文档入库验收
+## 18.1 文档入库验收
 
 ```txt
 可以上传 txt/md/pdf。
@@ -2605,7 +3694,7 @@ child chunks 有 embedding。
 
 ---
 
-## 17.2 检索验收
+## 18.2 检索验收
 
 ```txt
 debug-query use_llm=false 能返回 candidates。
@@ -2616,7 +3705,7 @@ selected_for_prompt 正确标记。
 
 ---
 
-## 17.3 问答验收
+## 18.3 问答验收
 
 ```txt
 debug-query use_llm=true 能返回 prompt 和 answer。
@@ -2627,7 +3716,7 @@ sources 可以追溯到 document、version、chunk。
 
 ---
 
-## 17.4 调试验收
+## 18.4 调试验收
 
 ```txt
 每次查询生成 rag_query_logs。
@@ -2639,11 +3728,19 @@ sources 可以追溯到 document、version、chunk。
 
 ---
 
-## 17.5 优化验收
+## 18.5 优化验收
 
 ```txt
 用户点踩可以生成 failure_case。
 测试集失败可以生成 failure_case。
 失败案例可以分类、填写分析和修复计划。
+query_log 和 failure_case 可以转成 eval case DRAFT。
+文档版本可以生成 eval case DRAFT 候选。
+DRAFT / REJECTED / INACTIVE 用例不会参与 eval_run。
+审核通过后 eval case 才会变成 ACTIVE 并参与 eval_run。
 搜索配置可以调整权重和 top_k。
+eval_run 可以保存搜索配置快照。
+eval_result 可以区分 retrieval_pass 和 answer_pass。
+use_llm=false 时按检索命中评估。
+use_llm=true 时按检索命中 + 回答质量评估。
 ```

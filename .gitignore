@@ -1,0 +1,33 @@
+# Local environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.*.local
+
+# Keep shareable environment templates tracked
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Local app data
+.data/
+uploads/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
