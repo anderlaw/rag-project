@@ -30,9 +30,18 @@ RAG 问答
 prompt 查看
 用户反馈
 失败案例管理
-测试集管理
+测试用例草稿、审核和评估运行管理
 搜索配置管理
 质量看板
+```
+
+测试用例在前端必须体现后端的审核约束：
+
+```txt
+自动生成、查询日志转入、失败案例转入的用例都先进入 DRAFT。
+DRAFT 用例需要人工补充或确认 expected_answer 和 expected_sources。
+审核通过后 status 变为 ACTIVE，才参与 eval_run。
+DRAFT / REJECTED / INACTIVE 不参与固定评测。
 ```
 
 前端需要服务两个角色：
@@ -116,6 +125,10 @@ src/
         ScoreBadge.tsx
         PromptViewer.tsx
         LLMResultPanel.tsx
+        DebugQueryForm.tsx
+        SelectedChunkPanel.tsx
+        DebugActions.tsx
+        QueryLogSnapshotPanel.tsx
 
     failures/
       api.ts
@@ -132,6 +145,9 @@ src/
       components/
         EvalCaseTable.tsx
         EvalCaseForm.tsx
+        EvalCaseReviewPanel.tsx
+        EvalExpectedSourceEditor.tsx
+        EvalDraftActions.tsx
         EvalRunSummary.tsx
         EvalResultTable.tsx
 
@@ -142,6 +158,7 @@ src/
         SearchProfileTable.tsx
         SearchProfileForm.tsx
         WeightSlider.tsx
+        SetDefaultSearchProfileButton.tsx
 
   components/
     common/
@@ -311,7 +328,7 @@ GET /api/v1/rag/eval-runs
 | 上传区域                                                                       |
 | +--------------------------------------------------------------------------+   |
 | | 拖拽文件到这里，或点击选择文件                                             |   |
-| | 支持：txt / md / pdf                                                       |   |
+| | 支持：txt / md / pdf / docx                                                |   |
 | +--------------------------------------------------------------------------+   |
 +--------------------------------------------------------------------------------+
 
@@ -417,7 +434,10 @@ POST /api/v1/documents/{document_id}/versions/upload
 | 版本列表                       | 当前版本信息                                    |
 | v1 COMPLETED 36 chunks         | version_id: 2                                  |
 | v2 COMPLETED 42 chunks [当前]  | file_hash: xxxxx                              |
-|                               | 创建时间：...                                  |
+|                               | parser_version: pdf-parser-v1                 |
+|                               | chunk_strategy: parent_child_v1               |
+|                               | 创建时间：...   处理完成：...                   |
+|                               | [生成测试用例草稿]                              |
 +-------------------------------+------------------------------------------------+
 
 +--------------------------------------------------------------------------------+
@@ -448,10 +468,12 @@ POST /api/v1/documents/{document_id}/versions/upload
 ```txt
 文档基础信息卡片
 版本列表
+版本解析配置和切片配置快照
 chunk 筛选区
 chunk 表格
 chunk 内容预览
 parent/child 切换
+从文档版本生成测试用例草稿按钮
 ```
 
 ---
@@ -466,7 +488,14 @@ parent/child 切换
 版本号
 状态
 chunk 数量
+原始文件名
+文件 hash
+parser_version
+chunk_strategy_name
+parser_config_snapshot
+chunk_config_snapshot
 创建时间
+处理完成时间
 是否当前版本
 ```
 
@@ -482,11 +511,20 @@ GET /api/v1/documents/{document_id}
 
 ```txt
 chunk_index
+child_index
 chunk_type
 section_title
 parent_chunk_id
 token_count
 content 摘要
+```
+
+说明：
+
+```txt
+chunk_index 是当前 document_version 下同一种 chunk_type 的全局顺序。
+PARENT 0 和 CHILD 0 可以同时存在。
+child_index 表示 CHILD 在所属 parent chunk 内的顺序，PARENT 为空。
 ```
 
 接口：
@@ -501,8 +539,23 @@ GET /api/v1/documents/{document_id}/chunks
 
 ```txt
 content
-content_with_context
+content_with_context（CHILD 可能有，PARENT 可为空）
 metadata
+```
+
+### DocumentVersionEvalDraftButton
+
+功能：
+
+```txt
+基于当前文档版本的 PARENT chunks 生成测试用例 DRAFT 候选。
+生成结果不会直接进入 ACTIVE，必须在测试集页面人工审核。
+```
+
+接口：
+
+```txt
+POST /api/v1/rag/document-versions/{document_version_id}/eval-case-drafts
 ```
 
 ---
@@ -609,6 +662,7 @@ AI 回答
 生成耗时
 模型名称
 最高分
+低置信度或无召回时的拒答状态
 ```
 
 ### SourceList
@@ -617,7 +671,9 @@ AI 回答
 
 ```txt
 文档名
+版本
 章节
+页码
 分数
 chunk 内容摘要
 展开按钮
@@ -697,13 +753,13 @@ LLM 回答是否基于资料？
 | Prompt 预览                           | LLM 回答                                  |
 | 你是一个知识库问答助手...              | 差旅报销需要提供发票、行程单...          |
 | 资料：                               |                                         |
-| [片段1]...                            | 模型：gpt-4.1-mini                       |
+| [片段1]...                            | 模型：zhipu-configured-model             |
 |                                      | 耗时：2300ms                             |
 +--------------------------------------+-----------------------------------------+
 
 +--------------------------------------------------------------------------------+
 | 操作                                                                            |
-| [标记为失败案例] [保存为测试用例] [复制 Prompt] [打开查询详情]                    |
+| [标记为失败案例] [转为测试用例草稿] [复制 Prompt] [打开查询详情]                  |
 +--------------------------------------------------------------------------------+
 ```
 
@@ -722,8 +778,9 @@ prompt 预览
 LLM 回答区
 分数展示
 手动标记失败按钮
-保存为测试用例按钮
+转为测试用例草稿按钮
 复制 prompt 按钮
+查询日志快照入口
 ```
 
 ---
@@ -776,6 +833,7 @@ content preview
 复制
 折叠/展开
 只读查看
+当后端返回 prompt=null 时展示未构建 prompt 的状态
 ```
 
 ### LLMResultPanel
@@ -787,6 +845,16 @@ answer
 model
 latency
 error
+used
+无召回拒答状态
+```
+
+说明：
+
+```txt
+use_llm=true 但没有 selected chunks 时，后端不会调用 LLM。
+此时 llm.used=false、prompt=null、model=null，answer 可为“根据当前资料无法确定”。
+前端应展示为低置信度/无召回拒答，而不是 LLM 调用失败。
 ```
 
 ### DebugActions
@@ -795,7 +863,7 @@ error
 
 ```txt
 标记失败案例
-保存为测试用例
+转为测试用例草稿
 复制 prompt
 查看查询详情
 ```
@@ -804,7 +872,18 @@ error
 
 ```txt
 POST /api/v1/rag/query-logs/{query_log_id}/failure-case
-POST /api/v1/rag/eval-cases
+POST /api/v1/rag/query-logs/{query_log_id}/eval-case-draft
+```
+
+### QueryLogSnapshotPanel
+
+展示：
+
+```txt
+search_profile_snapshot
+model_config_snapshot
+answer_prompt_version
+answer_prompt_text
 ```
 
 ---
@@ -834,13 +913,19 @@ POST /api/v1/rag/eval-cases
 +-----------------------------+-----------------------------+--------------------+
 
 +--------------------------------------------------------------------------------+
+| 配置快照                                                                         |
+| search_profile_snapshot / model_config_snapshot                                  |
++--------------------------------------------------------------------------------+
+
++--------------------------------------------------------------------------------+
 | 候选 Chunks                                                                      |
 | Rank | 文档 | 版本 | 章节 | 分数 | 是否进入 prompt | 内容摘要                     |
 +--------------------------------------------------------------------------------+
 
 +--------------------------------------------------------------------------------+
-| Prompt                                                                           |
-| ...                                                                              |
+| Answer Prompt                                                                    |
+| version: rag_qa_v1                                                               |
+| answer_prompt_text: ...                                                          |
 +--------------------------------------------------------------------------------+
 
 +--------------------------------------------------------------------------------+
@@ -853,6 +938,11 @@ POST /api/v1/rag/eval-cases
 | 用户反馈：NOT_HELPFUL / WRONG_SOURCE                                             |
 | 失败案例：RETRIEVAL_LOW_RANK / OPEN                                              |
 +--------------------------------------------------------------------------------+
+
++--------------------------------------------------------------------------------+
+| 操作                                                                             |
+| [转为测试用例草稿] [标记失败案例]                                                 |
++--------------------------------------------------------------------------------+
 ```
 
 ---
@@ -863,6 +953,29 @@ POST /api/v1/rag/eval-cases
 GET /api/v1/rag/query-logs/{query_log_id}
 POST /api/v1/rag/query-logs/{query_log_id}/feedback
 POST /api/v1/rag/query-logs/{query_log_id}/failure-case
+POST /api/v1/rag/query-logs/{query_log_id}/eval-case-draft
+```
+
+展示字段：
+
+```txt
+question
+search_mode
+use_llm
+search_profile_snapshot
+model_config_snapshot
+answer_prompt_version
+answer_prompt_text
+answer
+max_score
+min_score
+search_latency_ms
+llm_latency_ms
+total_latency_ms
+llm_error
+candidates
+feedback
+failure_case
 ```
 
 ---
