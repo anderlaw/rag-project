@@ -111,6 +111,7 @@ src/
         VersionTimeline.tsx
         ChunkTable.tsx
         ChunkPreview.tsx
+        DocumentVersionEvalDraftButton.tsx
 
     rag/
       api.ts
@@ -1094,7 +1095,7 @@ GET /api/v1/rag/failure-cases
 | 分析备注 [textarea]                                                               |
 | 修复计划 [textarea]                                                               |
 | 状态 [OPEN/ANALYZING/FIXED/WONT_FIX]   优先级 [1-5]                               |
-| [保存] [加入测试集]                                                               |
+| [保存] [转为回归测试草稿]                                                        |
 +--------------------------------------------------------------------------------+
 ```
 
@@ -1114,7 +1115,7 @@ prompt 预览
 状态选择
 优先级选择
 保存按钮
-加入测试集按钮
+转为回归测试草稿按钮
 ```
 
 ---
@@ -1124,7 +1125,15 @@ prompt 预览
 ```txt
 GET /api/v1/rag/failure-cases/{failure_case_id}
 PATCH /api/v1/rag/failure-cases/{failure_case_id}
-POST /api/v1/rag/eval-cases
+POST /api/v1/rag/failure-cases/{failure_case_id}/eval-case-draft
+```
+
+说明：
+
+```txt
+失败案例详情页需要后端提供 GET /api/v1/rag/failure-cases/{failure_case_id}。
+该接口应返回关联 query_log、feedback、candidates、answer_prompt_text 和 failure_case 本身。
+从失败案例转为测试用例时只创建 FAILURE_REGRESSION 类型 DRAFT，不直接创建 ACTIVE 用例。
 ```
 
 ---
@@ -1133,7 +1142,7 @@ POST /api/v1/rag/eval-cases
 
 ## 15.1 页面用途
 
-管理固定测试问题，运行测试集。
+管理测试用例草稿、人工审核、固定测试问题和测试集运行。
 
 ---
 
@@ -1141,19 +1150,24 @@ POST /api/v1/rag/eval-cases
 
 ```txt
 +--------------------------------------------------------------------------------+
-| 测试集                                                          [新建测试用例]   |
-| 用于验证切片、检索和回答效果                                                      |
+| 测试集                                                [新建草稿] [生成文档草稿]  |
+| 用于验证切片、检索和回答效果；只有 ACTIVE 用例参与测试运行                         |
 +--------------------------------------------------------------------------------+
 
 +--------------------------------------------------------------------------------+
 | 操作                                                                            |
-| 搜索配置 [默认混合检索 v]   use_llm [ ]   [运行测试集]                            |
+| 状态 [DRAFT v] 来源 [全部 v] 类型 [全部 v] 需审核 [是 v]                          |
++--------------------------------------------------------------------------------+
+
++--------------------------------------------------------------------------------+
+| 运行固定测试集                                                                  |
+| 搜索配置 [默认混合检索 v]   use_llm [ ]   [运行 ACTIVE 用例]                      |
 +--------------------------------------------------------------------------------+
 
 +--------------------------------------------------------------------------------+
 | 测试用例列表                                                                     |
-| ID | 问题 | 类型 | 期望文档 | 期望章节 | 状态 | 优先级 | 操作                   |
-| 1  | 差旅报销需要什么材料？ | CORE_RULE | 报销制度 | 差旅报销 | ACTIVE | 1 | 编辑 |
+| ID | 问题 | 类型 | 来源 | 期望来源 | 状态 | 优先级 | 审核 | 操作                   |
+| 1  | 差旅报销需要什么材料？ | CORE_RULE | MANUAL | 报销制度/差旅 | DRAFT | 1 | 待审核 | 编辑/审核 |
 +--------------------------------------------------------------------------------+
 
 +--------------------------------------------------------------------------------+
@@ -1168,7 +1182,9 @@ POST /api/v1/rag/eval-cases
 
 ```txt
 测试用例表
-新建测试用例弹窗
+新建草稿弹窗
+测试用例审核面板
+期望来源编辑器
 运行测试集按钮
 搜索配置选择
 use_llm 开关
@@ -1186,10 +1202,13 @@ use_llm 开关
 ```txt
 question
 case_type
-expected_document
-expected_section
+created_from
+source_ref_id
+expected_sources summary
 status
 priority
+reviewed_by
+reviewed_at
 actions
 ```
 
@@ -1207,10 +1226,24 @@ GET /api/v1/rag/eval-cases
 question
 expected_answer
 case_type
-expected_document_id
+status
+priority
+created_from
+source_ref_id
+source_payload
+expected_sources[]
+review_note
+reviewed_by
+```
+
+expected_sources 字段：
+
+```txt
+document_id
+document_version_id
 expected_section_title
 expected_keywords
-priority
+expected_chunk_id
 ```
 
 接口：
@@ -1220,7 +1253,60 @@ POST /api/v1/rag/eval-cases
 PATCH /api/v1/rag/eval-cases/{id}
 ```
 
+说明：
+
+```txt
+POST /api/v1/rag/eval-cases 默认创建 DRAFT。
+DRAFT 可以编辑 question、expected_answer 和 expected_sources。
+ACTIVE 用例原则上不直接改标准答案，建议复制为新 DRAFT 或先停用旧用例。
+INACTIVE 用于停用历史用例，不删除历史记录。
+```
+
+### EvalCaseReviewPanel
+
+功能：
+
+```txt
+展示 DRAFT 的来源、来源快照、问题、期望答案和期望来源。
+支持 APPROVE 和 REJECT。
+APPROVE 前必须确认 question 和 expected_sources。
+expected_answer 为空时，该用例只做检索评估。
+REJECT 必须填写 review_note。
+```
+
+接口：
+
+```txt
+POST /api/v1/rag/eval-cases/{eval_case_id}/review
+```
+
+### EvalDraftActions
+
+入口：
+
+```txt
+从查询日志转入 DRAFT
+从失败案例转入 DRAFT
+从文档版本生成 DRAFT 候选
+```
+
+接口：
+
+```txt
+POST /api/v1/rag/query-logs/{query_log_id}/eval-case-draft
+POST /api/v1/rag/failure-cases/{failure_case_id}/eval-case-draft
+POST /api/v1/rag/document-versions/{document_version_id}/eval-case-drafts
+```
+
 ### RunEvalButton
+
+说明：
+
+```txt
+运行测试集时后端只读取 ACTIVE 用例。
+use_llm=false 时主要看 retrieval_pass。
+use_llm=true 且 expected_answer 不为空时同时展示 answer_pass。
+```
 
 接口：
 
@@ -1244,6 +1330,7 @@ POST /api/v1/rag/eval-runs
 +--------------------------------------------------------------------------------+
 | 测试运行详情 #10                                                                  |
 | 名称：调整混合检索权重后的测试                                                    |
+| 状态：COMPLETED   use_llm: false   搜索配置快照：默认混合检索                      |
 +--------------------------------------------------------------------------------+
 
 +------------------+------------------+------------------+------------------+
@@ -1253,9 +1340,14 @@ POST /api/v1/rag/eval-runs
 
 +--------------------------------------------------------------------------------+
 | 结果列表                                                                         |
-| 问题 | Top1命中 | Top5命中 | Answer通过 | 失败原因 | 查询日志 | 失败案例             |
-| ...  | 是       | 是       | -          | -        | 查看     | -                    |
-| ...  | 否       | 否       | -          | 未命中   | 查看     | 查看                 |
+| 问题 | Top1 | Top5 | 检索通过 | Answer通过 | 评分 | 失败原因 | 查询日志 | 失败案例     |
+| ...  | 是   | 是   | 是       | -          | -    | -        | 查看     | -            |
+| ...  | 否   | 否   | 否       | -          | -    | 未命中   | 查看     | 查看         |
++--------------------------------------------------------------------------------+
+
++--------------------------------------------------------------------------------+
+| 评估配置快照                                                                     |
+| search_profile_snapshot / eval_config / embedding_model / llm_model              |
 +--------------------------------------------------------------------------------+
 ```
 
@@ -1267,6 +1359,24 @@ POST /api/v1/rag/eval-runs
 GET /api/v1/rag/eval-runs/{eval_run_id}
 GET /api/v1/rag/query-logs/{query_log_id}
 GET /api/v1/rag/failure-cases/{failure_case_id}
+```
+
+展示字段：
+
+```txt
+run_status
+use_llm
+search_profile_snapshot
+eval_config
+embedding_model
+llm_model
+retrieval_pass
+answer_pass
+answer_score
+answer_eval_detail
+failure_reason
+failure_created
+failure_case_id
 ```
 
 ---
@@ -1325,6 +1435,7 @@ top_k 输入
 GET /api/v1/rag/search-profiles
 POST /api/v1/rag/search-profiles
 PATCH /api/v1/rag/search-profiles/{id}
+POST /api/v1/rag/search-profiles/{id}/set-default
 ```
 
 ---
@@ -1337,6 +1448,7 @@ PATCH /api/v1/rag/search-profiles/{id}
 | DocumentsPage         | DocumentTable       | GET /documents                      |
 | DocumentDetailPage    | VersionTimeline     | GET /documents/{id}                 |
 | DocumentDetailPage    | ChunkTable          | GET /documents/{id}/chunks          |
+| DocumentDetailPage    | DocumentVersionEvalDraftButton | POST /rag/document-versions/{id}/eval-case-drafts |
 | ChatPage              | QueryInput          | POST /rag/debug-query               |
 | ChatPage              | SourceList          | POST /rag/debug-query 返回 sources    |
 | ChatPage              | FeedbackBar         | POST /rag/query-logs/{id}/feedback  |
@@ -1344,15 +1456,22 @@ PATCH /api/v1/rag/search-profiles/{id}
 | DebugPage             | CandidateTable      | POST /rag/debug-query 返回 candidates |
 | DebugPage             | PromptViewer        | POST /rag/debug-query 返回 prompt     |
 | DebugPage             | LLMResultPanel      | POST /rag/debug-query 返回 llm        |
+| DebugPage             | DebugActions        | POST /rag/query-logs/{id}/failure-case；POST /rag/query-logs/{id}/eval-case-draft |
 | QueryLogDetailPage    | QueryDetail         | GET /rag/query-logs/{id}            |
+| QueryLogDetailPage    | QueryLogSnapshotPanel | GET /rag/query-logs/{id}          |
+| QueryLogDetailPage    | EvalDraftActions    | POST /rag/query-logs/{id}/eval-case-draft |
 | FailureCasesPage      | FailureCaseTable    | GET /rag/failure-cases              |
-| FailureCaseDetailPage | FailureAnalysisForm | PATCH /rag/failure-cases/{id}       |
+| FailureCaseDetailPage | FailureAnalysisForm | GET/PATCH /rag/failure-cases/{id}   |
+| FailureCaseDetailPage | EvalDraftActions    | POST /rag/failure-cases/{id}/eval-case-draft |
 | EvalCasesPage         | EvalCaseTable       | GET /rag/eval-cases                 |
-| EvalCasesPage         | EvalCaseForm        | POST /rag/eval-cases                |
+| EvalCasesPage         | EvalCaseForm        | POST/PATCH /rag/eval-cases          |
+| EvalCasesPage         | EvalCaseReviewPanel | POST /rag/eval-cases/{id}/review    |
+| EvalCasesPage         | EvalDraftActions    | POST /rag/document-versions/{id}/eval-case-drafts |
 | EvalCasesPage         | RunEvalButton       | POST /rag/eval-runs                 |
 | EvalRunDetailPage     | EvalResultTable     | GET /rag/eval-runs/{id}             |
 | SearchProfilesPage    | SearchProfileTable  | GET /rag/search-profiles            |
 | SearchProfilesPage    | SearchProfileForm   | POST/PATCH /rag/search-profiles     |
+| SearchProfilesPage    | SetDefaultSearchProfileButton | POST /rag/search-profiles/{id}/set-default |
 
 ---
 
@@ -1381,7 +1500,10 @@ search profiles
 ["document-chunks", documentId, version, chunkType]
 ["query-log", queryLogId]
 ["failure-cases", filters]
-["eval-cases"]
+["failure-case", failureCaseId]
+["eval-cases", filters]
+["eval-run", evalRunId]
+["eval-runs", filters]
 ["search-profiles"]
 ```
 
@@ -1397,6 +1519,8 @@ use_llm 开关
 当前选中的 chunk
 当前展开的 source
 当前编辑中的表单
+当前审核中的 eval case
+当前查看的 JSON 快照
 弹窗打开状态
 ```
 
@@ -1437,7 +1561,9 @@ use_llm 开关
   ↓
 调用 POST /rag/debug-query use_llm=true
   ↓
-展示 AI 回答
+根据 llm.used 分支展示结果
+  - true：展示 AI 回答、模型和耗时
+  - false：展示低置信度/无召回拒答状态
   ↓
 右侧展示引用来源
   ↓
@@ -1467,7 +1593,9 @@ use_llm 开关
   ↓
 查看 prompt 和回答
   ↓
-如有问题，标记失败案例或保存为测试用例
+如有问题，标记失败案例或转为测试用例 DRAFT
+  ↓
+在测试集页面补充 expected_answer / expected_sources 并审核
 ```
 
 ---
@@ -1492,6 +1620,10 @@ use_llm 开关
 重新运行测试集
   ↓
 确认修复后标记 FIXED
+  ↓
+必要时转为 FAILURE_REGRESSION 类型 DRAFT
+  ↓
+审核通过后进入 ACTIVE 回归测试集
 ```
 
 ---
@@ -1501,11 +1633,15 @@ use_llm 开关
 ```txt
 开发者进入测试集页面
   ↓
-维护测试问题
+新建、转入或生成 DRAFT 测试用例
+  ↓
+补充或确认 expected_answer 和 expected_sources
+  ↓
+人工审核 APPROVE，status 变为 ACTIVE
   ↓
 选择搜索配置
   ↓
-点击运行测试集
+点击运行 ACTIVE 用例
   ↓
 后端逐条调用 debug-query
   ↓
@@ -1570,9 +1706,13 @@ use_llm 开关
 候选 chunks
 最终 chunks
 完整 prompt
+prompt 版本
 LLM 回答
+LLM 是否实际调用
 分数明细
 是否进入 prompt
+search_profile_snapshot
+model_config_snapshot
 ```
 
 ---
@@ -1592,6 +1732,31 @@ prompt
 分析备注
 修复计划
 状态
+来源快照
+转为回归测试草稿入口
+```
+
+## 21.5 测试集页面
+
+测试集页面必须区分：
+
+```txt
+DRAFT：待补充和审核，不参与运行
+ACTIVE：参与 eval_run
+INACTIVE：停用，不参与运行
+REJECTED：拒绝入库，不参与运行
+```
+
+审核面板必须展示：
+
+```txt
+created_from
+source_ref_id
+source_payload
+question
+expected_answer
+expected_sources
+review_note
 ```
 
 ---
@@ -1648,6 +1813,9 @@ EvalCasesPage
 EvalRunDetailPage
 EvalCaseForm
 EvalCaseTable
+EvalExpectedSourceEditor
+EvalCaseReviewPanel
+EvalDraftActions
 EvalResultTable
 ```
 
@@ -1698,9 +1866,10 @@ DashboardMetricCard
 可以查看 candidates。
 可以查看 selected chunks。
 可以查看 prompt。
+可以看到 prompt 为空时的无召回拒答状态。
 可以查看 LLM answer。
 可以标记失败案例。
-可以保存为测试用例。
+可以从 query log 转为测试用例 DRAFT。
 ```
 
 ---
@@ -1714,6 +1883,7 @@ DashboardMetricCard
 可以填写分析备注。
 可以填写修复计划。
 可以更新状态。
+可以从失败案例转为 FAILURE_REGRESSION 类型 DRAFT。
 ```
 
 ---
@@ -1721,11 +1891,14 @@ DashboardMetricCard
 ## 23.5 测试集验收
 
 ```txt
-可以创建测试用例。
+可以创建 DRAFT 测试用例。
 可以维护期望来源。
-可以运行测试集。
+可以审核通过或拒绝 DRAFT。
+只有 ACTIVE 用例参与测试集运行。
+可以从查询日志、失败案例、文档版本生成 DRAFT。
 可以查看运行结果。
 失败用例可以跳转查询详情。
+失败用例可以跳转失败案例。
 ```
 
 ---
