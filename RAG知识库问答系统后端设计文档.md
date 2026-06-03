@@ -2755,13 +2755,9 @@ LIMIT :trgm_top_k;
 
 ---
 
-## 10.4 分数融合
+## 10.4 候选合并与分数融合
 
 ```python
-def rrf(rank, k=60):
-    return 1 / (k + rank)
-
-
 def search(question, query_embedding, profile):
     vector_rows = []
     keyword_rows = []
@@ -2782,37 +2778,37 @@ def search(question, query_embedding, profile):
 
     candidates = {}
 
-    for rank, row in enumerate(vector_rows, start=1):
+    for row in vector_rows:
         cid = row.chunk_id
         candidates.setdefault(cid, row_to_candidate(row))
-        candidates[cid].vector_score = row.vector_score
-        candidates[cid].vector_rank = rank
-        candidates[cid].raw_fusion_score += profile.vector_weight * rrf(rank)
+        candidates[cid].vector_score = normalize_vector_score(row.vector_score)
 
-    for rank, row in enumerate(keyword_rows, start=1):
+    for row in keyword_rows:
         cid = row.chunk_id
         candidates.setdefault(cid, row_to_candidate(row))
-        candidates[cid].keyword_score = row.keyword_score
-        candidates[cid].keyword_rank = rank
-        candidates[cid].raw_fusion_score += profile.keyword_weight * rrf(rank)
+        candidates[cid].keyword_score = normalize_keyword_score(row.keyword_score)
 
-    for rank, row in enumerate(trgm_rows, start=1):
+    for row in trgm_rows:
         cid = row.chunk_id
         candidates.setdefault(cid, row_to_candidate(row))
-        candidates[cid].trgm_score = row.trgm_score
-        candidates[cid].trgm_rank = rank
-        candidates[cid].raw_fusion_score += profile.trgm_weight * rrf(rank)
+        candidates[cid].trgm_score = normalize_trgm_score(row.trgm_score)
 
     result = []
-    max_raw_score = max(
-        [c.raw_fusion_score for c in candidates.values()],
-        default=0,
-    )
 
     for candidate in candidates.values():
+        candidate.vector_score = candidate.vector_score or 0
+        candidate.keyword_score = candidate.keyword_score or 0
+        candidate.trgm_score = candidate.trgm_score or 0
+        active_scores = [
+            (profile.vector_weight, candidate.vector_score),
+            (profile.keyword_weight, candidate.keyword_score),
+            (profile.trgm_weight, candidate.trgm_score),
+        ]
+        active_scores = [(weight, score) for weight, score in active_scores if weight > 0 and score > 0]
+        active_weight = sum(weight for weight, score in active_scores)
         candidate.final_score = (
-            candidate.raw_fusion_score / max_raw_score
-            if max_raw_score > 0
+            sum(weight * score for weight, score in active_scores) / active_weight
+            if active_weight
             else 0
         )
         result.append(candidate)
@@ -2825,11 +2821,26 @@ def search(question, query_embedding, profile):
 说明：
 
 ```txt
-不要直接把 vector_score、ts_rank_cd、trgm_score 相加。
-三种分数分布不同，直接加权会导致 min_final_score 没有稳定含义。
-MVP 建议使用 RRF 这类 rank fusion，再把最终分归一化到 0~1，便于统一阈值。
+三路召回结果按 chunk_id 去重合并。
+同一个 chunk 被多路召回时，只保留一条候选记录，并补齐 vector_score、keyword_score、trgm_score。
+某一路没有召回到该 chunk 时，该路分数记为 0，但不参与该候选的 active_weight。
+final_score 统一使用搜索配置中的权重计算，但按当前候选实际命中的正分通道做归一化加权平均。
+默认权重为 vector_weight=0.65、keyword_weight=0.25、trgm_weight=0.10。
+默认公式为 final_score = sum(weight * positive_score) / sum(active_weight)。
+例如某 chunk 只有 keyword_score=0.75，则 final_score=0.75，而不是 0.25*0.75。
+所有参与加权的分项都必须先归一化或裁剪到 0~1，否则 min_final_score 不具备稳定含义。
 如果只选择 KEYWORD 或 TRIGRAM 模式，不应生成 query embedding。
-row_to_candidate 需要把 raw_fusion_score 初始化为 0，并把缺失的各路分数按 0 或 null 明确保存，避免 None 参与计算。
+实际运行应使用 DashScope 文本向量模型生成 query embedding 和 child chunk embedding；fake embedding 只允许在自动化测试或无外部依赖 smoke test 中使用，不作为检索质量评估依据。
+row_to_candidate 需要把缺失的各路分数按 0 明确保存，避免 None 参与计算。
+DebugPage 必须返回并展示 vector_score、keyword_score、trgm_score、final_score、selected_for_prompt，方便解释候选 chunk 为什么被选中或被淘汰。
+```
+
+分项归一化规则：
+
+```txt
+vector_score：使用 1 - cosine_distance，并 clamp 到 0~1。
+keyword_score：MVP 优先按 query term 覆盖率计算；中文问题需要过滤“是什么/什么/吗”等疑问停用词，并计算有效中文字符覆盖率；短语完整命中可加权提升，最终 clamp 到 0~1；如果使用 ts_rank_cd，需要对本次 keyword_rows 的最高分归一化。
+trgm_score：pg_trgm similarity 本身通常为 0~1，仍需 clamp 到 0~1。
 ```
 
 ---
