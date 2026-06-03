@@ -180,3 +180,71 @@ export type EvalCase = {
   created_at: string;
   updated_at: string;
 };
+
+export type SynonymGroupStatus = "ACTIVE" | "INACTIVE";
+
+export type SynonymTermType = "CANONICAL" | "SYNONYM";
+
+export type SynonymTermStatus = "ACTIVE" | "INACTIVE";
+
+export type SynonymTerm = {
+  id: number;
+  group_id: number;
+  term: string;
+  term_type: SynonymTermType;
+  language: string;
+  weight: number;
+  status: SynonymTermStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SynonymGroup = {
+  id: number;
+  name: string;
+  description: string | null;
+  status: SynonymGroupStatus;
+  terms: SynonymTerm[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type SynonymGroupListResponse = {
+  items: SynonymGroup[];
+};
+
+export type CreateSynonymTermRequest = {
+  term: string;
+  term_type?: SynonymTermType;
+  language?: string;
+  weight?: number;
+  status?: SynonymTermStatus;
+};
+
+export type CreateSynonymGroupRequest = {
+  name: string;
+  description?: string | null;
+  status?: SynonymGroupStatus;
+  terms?: CreateSynonymTermRequest[];
+};
+
+export type UpdateSynonymGroupRequest = {
+  name?: string;
+  description?: string | null;
+  status?: SynonymGroupStatus;
+};
+
+export type UpdateSynonymTermRequest = {
+  term?: string;
+  term_type?: SynonymTermType;
+  language?: string;
+  weight?: number;
+  status?: SynonymTermStatus;
+};
+
+export type NormalizeQueryResponse = {
+  original_text: string;
+  normalized_text: string;
+  expanded_text: string;
+  applied_synonym_groups: string[];
+};

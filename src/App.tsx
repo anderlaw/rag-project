@@ -5,6 +5,7 @@ import { DebugPage } from "./pages/DebugPage";
 import { DocumentDetailPage } from "./pages/DocumentDetailPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { QueryLogDetailPage } from "./pages/QueryLogDetailPage";
+import { SynonymsPage } from "./pages/SynonymsPage";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/documents" element={<DocumentsPage />} />
         <Route path="/documents/:documentId" element={<DocumentDetailPage />} />
         <Route path="/rag/debug" element={<DebugPage />} />
+        <Route path="/rag/synonyms" element={<SynonymsPage />} />
         <Route path="/rag/query-logs/:queryLogId" element={<QueryLogDetailPage />} />
         <Route path="*" element={<Navigate to="/documents" replace />} />
       </Route>

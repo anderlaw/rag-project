@@ -6,6 +6,8 @@ from app.models.document import (
     RagFailureCase,
     RagQueryCandidate,
     RagQueryLog,
+    RagSynonymGroup,
+    RagSynonymTerm,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "RagFailureCase",
     "RagQueryCandidate",
     "RagQueryLog",
+    "RagSynonymGroup",
+    "RagSynonymTerm",
 ]

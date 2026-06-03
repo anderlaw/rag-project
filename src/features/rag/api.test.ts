@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createEvalCaseFromQueryLog, createFailureCaseFromQueryLog, getQueryLogDetail, runDebugQuery } from "./api";
+import {
+  createEvalCaseFromQueryLog,
+  createFailureCaseFromQueryLog,
+  createSynonymGroup,
+  getQueryLogDetail,
+  listSynonymGroups,
+  normalizeQuery,
+  runDebugQuery
+} from "./api";
 
 describe("rag api", () => {
   it("posts debug query requests to the backend", async () => {
@@ -82,6 +90,57 @@ describe("rag api", () => {
         priority: 2
       })
     ).resolves.toMatchObject({ id: 8 });
+  });
+
+  it("lists synonym groups", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("/api/v1/rag/synonyms");
+      return jsonResponse({ items: [{ id: 1, name: "技术栈", terms: [] }] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listSynonymGroups()).resolves.toMatchObject({
+      items: [{ id: 1, name: "技术栈" }]
+    });
+  });
+
+  it("creates synonym groups with seed terms", async () => {
+    const request = {
+      name: "客户画像",
+      terms: [
+        { term: "客户画像", term_type: "CANONICAL" as const, language: "zh" },
+        { term: "ICP", term_type: "SYNONYM" as const, language: "en" }
+      ]
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("/api/v1/rag/synonyms");
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe(JSON.stringify(request));
+      return jsonResponse({ id: 2, name: "客户画像", terms: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createSynonymGroup(request)).resolves.toMatchObject({ id: 2, name: "客户画像" });
+  });
+
+  it("normalizes queries through the backend", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("/api/v1/rag/normalize-query");
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe(JSON.stringify({ question: "告诉我ICP是啥" }));
+      return jsonResponse({
+        original_text: "告诉我ICP是啥",
+        normalized_text: "ICP",
+        expanded_text: "ICP 客户画像",
+        applied_synonym_groups: ["客户画像"]
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(normalizeQuery("告诉我ICP是啥")).resolves.toMatchObject({
+      normalized_text: "ICP",
+      applied_synonym_groups: ["客户画像"]
+    });
   });
 });
 

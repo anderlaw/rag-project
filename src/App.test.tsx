@@ -150,6 +150,43 @@ describe("document management app", () => {
 
     expect(await screen.findByText("评测用例 #8 已保存")).toBeInTheDocument();
   });
+
+  it("manages synonym groups and tests query normalization", async () => {
+    vi.stubGlobal("fetch", mockSynonymsFetch());
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/rag/synonyms"]}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByRole("heading", { name: "检索词典" })).toBeInTheDocument();
+    expect(await screen.findByText("技术选型")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "标准词" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "同义词" })).toBeInTheDocument();
+    expect(screen.getAllByRole("option", { name: "启用" }).length).toBeGreaterThan(0);
+
+    await userEvent.type(screen.getByLabelText("词组名称"), "客户画像");
+    await userEvent.type(screen.getByLabelText("描述"), "获客领域词");
+    await userEvent.type(screen.getByLabelText("标准词"), "客户画像");
+    await userEvent.type(screen.getByLabelText("同义词"), "ICP\n目标客户画像");
+    await userEvent.click(screen.getByRole("button", { name: "保存词组" }));
+
+    expect(await screen.findByText("词组 #2 已保存")).toBeInTheDocument();
+    expect((await screen.findAllByText("客户画像")).length).toBeGreaterThan(0);
+
+    await userEvent.clear(screen.getByLabelText("问题"));
+    await userEvent.type(screen.getByLabelText("问题"), "告诉我ICP是啥");
+    await userEvent.click(screen.getByRole("button", { name: "试算" }));
+
+    expect(await screen.findByText("ICP 客户画像")).toBeInTheDocument();
+    expect(screen.getByText("命中词组")).toBeInTheDocument();
+  });
 });
 
 function mockFetch() {
@@ -490,6 +527,119 @@ function mockQueryLogSaveFetch() {
       });
     }
     return baseFetch(input);
+  });
+}
+
+function mockSynonymsFetch() {
+  let created = false;
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/v1/rag/synonyms" && !init?.method) {
+      return jsonResponse({
+        items: [
+          {
+            id: 1,
+            name: "技术栈",
+            description: "技术栈相关 query 扩展默认词组",
+            status: "ACTIVE",
+            created_at: "2026-06-03T10:00:00",
+            updated_at: "2026-06-03T10:00:00",
+            terms: [
+              {
+                id: 1,
+                group_id: 1,
+                term: "技术栈",
+                term_type: "CANONICAL",
+                language: "zh",
+                weight: 1,
+                status: "ACTIVE",
+                created_at: "2026-06-03T10:00:00",
+                updated_at: "2026-06-03T10:00:00"
+              },
+              {
+                id: 2,
+                group_id: 1,
+                term: "技术选型",
+                term_type: "SYNONYM",
+                language: "zh",
+                weight: 1,
+                status: "ACTIVE",
+                created_at: "2026-06-03T10:00:00",
+                updated_at: "2026-06-03T10:00:00"
+              }
+            ]
+          },
+          ...(created
+            ? [
+                {
+                  id: 2,
+                  name: "客户画像",
+                  description: "获客领域词",
+                  status: "ACTIVE",
+                  created_at: "2026-06-03T10:00:00",
+                  updated_at: "2026-06-03T10:00:00",
+                  terms: [
+                    {
+                      id: 3,
+                      group_id: 2,
+                      term: "客户画像",
+                      term_type: "CANONICAL",
+                      language: "zh",
+                      weight: 1,
+                      status: "ACTIVE",
+                      created_at: "2026-06-03T10:00:00",
+                      updated_at: "2026-06-03T10:00:00"
+                    },
+                    {
+                      id: 4,
+                      group_id: 2,
+                      term: "ICP",
+                      term_type: "SYNONYM",
+                      language: "en",
+                      weight: 1,
+                      status: "ACTIVE",
+                      created_at: "2026-06-03T10:00:00",
+                      updated_at: "2026-06-03T10:00:00"
+                    }
+                  ]
+                }
+              ]
+            : [])
+        ]
+      });
+    }
+    if (url === "/api/v1/rag/synonyms" && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        name: "客户画像",
+        description: "获客领域词",
+        status: "ACTIVE",
+        terms: [
+          { term: "客户画像", term_type: "CANONICAL", language: "zh" },
+          { term: "ICP", term_type: "SYNONYM", language: "en" },
+          { term: "目标客户画像", term_type: "SYNONYM", language: "zh" }
+        ]
+      });
+      created = true;
+      return jsonResponse({
+        id: 2,
+        name: "客户画像",
+        description: "获客领域词",
+        status: "ACTIVE",
+        created_at: "2026-06-03T10:00:00",
+        updated_at: "2026-06-03T10:00:00",
+        terms: []
+      });
+    }
+    if (url === "/api/v1/rag/normalize-query" && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toEqual({ question: "告诉我ICP是啥" });
+      return jsonResponse({
+        original_text: "告诉我ICP是啥",
+        normalized_text: "ICP",
+        expanded_text: "ICP 客户画像",
+        applied_synonym_groups: ["客户画像"]
+      });
+    }
+    throw new Error(`unexpected request ${url}`);
   });
 }
 

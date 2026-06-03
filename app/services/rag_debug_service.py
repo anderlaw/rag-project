@@ -17,6 +17,8 @@ from app.models.document import (
     RagFailureCase,
     RagQueryCandidate,
     RagQueryLog,
+    RagSynonymGroup,
+    RagSynonymTerm,
 )
 from app.schemas.rag import (
     CreateEvalCaseFromQueryLogRequest,
@@ -41,6 +43,7 @@ from app.services.embedding import create_embedding_service
 ANSWER_PROMPT_VERSION = "rag_qa_v1"
 NO_RECALL_ANSWER = "根据当前资料无法确定。"
 CJK_STOP_CHARS = set("的是了嘛吗呢啊呀么什请问和与或及在对从为")
+COLLOQUIAL_QUERY_NOISE = ("告诉我", "我的", "是啥")
 
 
 @dataclass
@@ -70,12 +73,28 @@ class CandidateDraft:
     rank: int = 0
 
 
+@dataclass(frozen=True)
+class NormalizedQuery:
+    original_text: str
+    normalized_text: str
+    expanded_text: str
+    applied_synonym_groups: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class QuerySynonymGroup:
+    name: str
+    terms: tuple[str, ...]
+
+
 def run_debug_query(db: Session, request: DebugQueryRequest) -> DebugQueryResponse:
     started_at = time.perf_counter()
     profile = _profile_from_request(request)
     chunks = _list_searchable_chunks(db)
     diagnostics = _build_document_diagnostics(db, request.question, searchable_child_chunk_count=len(chunks))
-    query_embedding = _embed_query(request.question) if profile.vector_top_k > 0 else None
+    synonym_groups = _load_active_synonym_groups(db)
+    normalized_query = _normalize_query(request.question, synonym_groups=synonym_groups)
+    query_embedding = _embed_query(normalized_query.expanded_text) if profile.vector_top_k > 0 else None
 
     vector_rows = _top_k(
         [
@@ -87,14 +106,30 @@ def run_debug_query(db: Session, request: DebugQueryRequest) -> DebugQueryRespon
     )
     keyword_rows = _top_k(
         [
-            (chunk, document_name, _keyword_score(request.question, chunk.search_text or chunk.content_with_context or chunk.content))
+            (
+                chunk,
+                document_name,
+                _keyword_score(
+                    request.question,
+                    chunk.search_text or chunk.content_with_context or chunk.content,
+                    normalized_query=normalized_query,
+                ),
+            )
             for chunk, document_name in chunks
         ],
         top_k=profile.keyword_top_k,
     )
     trgm_rows = _top_k(
         [
-            (chunk, document_name, _trgm_score(request.question, chunk.search_text or chunk.content_with_context or chunk.content))
+            (
+                chunk,
+                document_name,
+                _trgm_score(
+                    request.question,
+                    chunk.search_text or chunk.content_with_context or chunk.content,
+                    normalized_query=normalized_query,
+                ),
+            )
             for chunk, document_name in chunks
         ],
         top_k=profile.trgm_top_k,
@@ -459,10 +494,20 @@ def _vector_score(query_embedding: list[float] | None, chunk_embedding) -> float
     return _round_score(_clamp(cosine_similarity))
 
 
-def _keyword_score(question: str, text: str) -> float:
-    query = question.strip().lower()
+def _keyword_score(question: str, text: str, *, normalized_query: NormalizedQuery | None = None) -> float:
+    normalized_query = normalized_query or _normalize_query(question)
     haystack = text.lower()
-    if not query or not haystack:
+    if not normalized_query.normalized_text or not haystack:
+        return 0
+    return max(
+        _keyword_score_for_query(normalized_query.normalized_text, haystack),
+        _keyword_score_for_query(normalized_query.expanded_text, haystack),
+    )
+
+
+def _keyword_score_for_query(query: str, haystack: str) -> float:
+    query = query.strip().lower()
+    if not query:
         return 0
     terms = _terms(query)
     if not terms:
@@ -471,13 +516,23 @@ def _keyword_score(question: str, text: str) -> float:
     coverage = matched / len(terms)
     if query in haystack:
         coverage = 1
-    return _round_score(max(_clamp(coverage), _character_coverage_score(query, haystack)))
+    return _round_score(max(_clamp(coverage), _character_coverage_score_for_query(query, haystack)))
 
 
-def _trgm_score(question: str, text: str) -> float:
-    query = question.strip().lower()
+def _trgm_score(question: str, text: str, *, normalized_query: NormalizedQuery | None = None) -> float:
+    normalized_query = normalized_query or _normalize_query(question)
     haystack = text.lower()
-    if not query or not haystack:
+    if not normalized_query.normalized_text or not haystack:
+        return 0
+    return max(
+        _trgm_score_for_query(normalized_query.normalized_text, haystack),
+        _trgm_score_for_query(normalized_query.expanded_text, haystack),
+    )
+
+
+def _trgm_score_for_query(query: str, haystack: str) -> float:
+    query = query.strip().lower()
+    if not query:
         return 0
     if query in haystack:
         return 1
@@ -494,11 +549,82 @@ def _terms(value: str) -> list[str]:
     return ascii_terms + cjk_terms
 
 
+def _normalize_query(value: str, synonym_groups: list[QuerySynonymGroup] | None = None) -> NormalizedQuery:
+    normalized = value.strip()
+    for noise in COLLOQUIAL_QUERY_NOISE:
+        normalized = normalized.replace(noise, "")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    expanded_terms: list[str] = []
+    applied_groups: list[str] = []
+    for group in synonym_groups or []:
+        if not _query_matches_synonym_group(normalized, group):
+            continue
+        applied_groups.append(group.name)
+        expanded_terms.extend(term for term in group.terms if not _contains_term(normalized, term))
+
+    expanded = " ".join(_dedupe_terms([part for part in [normalized, *expanded_terms] if part])).strip()
+    return NormalizedQuery(
+        original_text=value,
+        normalized_text=normalized,
+        expanded_text=expanded,
+        applied_synonym_groups=tuple(_dedupe_terms(applied_groups)),
+    )
+
+
+def _load_active_synonym_groups(db: Session) -> list[QuerySynonymGroup]:
+    rows = db.execute(
+        select(RagSynonymGroup.name, RagSynonymTerm.term)
+        .join(RagSynonymTerm, RagSynonymTerm.group_id == RagSynonymGroup.id)
+        .where(RagSynonymGroup.status == "ACTIVE", RagSynonymTerm.status == "ACTIVE")
+        .order_by(RagSynonymGroup.id.asc(), RagSynonymTerm.term_type.asc(), RagSynonymTerm.id.asc())
+    )
+    terms_by_group: dict[str, list[str]] = {}
+    for group_name, term in rows:
+        terms_by_group.setdefault(group_name, []).append(term)
+    return [
+        QuerySynonymGroup(name=group_name, terms=tuple(_dedupe_terms(terms)))
+        for group_name, terms in terms_by_group.items()
+        if terms
+    ]
+
+
+def _query_matches_synonym_group(query: str, group: QuerySynonymGroup) -> bool:
+    return any(_contains_term(query, term) for term in group.terms)
+
+
+def _contains_term(value: str, term: str) -> bool:
+    if not term:
+        return False
+    return term.lower() in value.lower()
+
+
+def _dedupe_terms(values: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized_value = value.strip()
+        key = normalized_value.lower()
+        if not normalized_value or key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized_value)
+    return result
+
+
 def _character_coverage_score(question: str, text: str) -> float:
-    ascii_terms = re.findall(r"[a-z0-9]+", question.lower())
+    normalized_query = _normalize_query(question)
+    return max(
+        _character_coverage_score_for_query(normalized_query.normalized_text, text),
+        _character_coverage_score_for_query(normalized_query.expanded_text, text),
+    )
+
+
+def _character_coverage_score_for_query(query: str, text: str) -> float:
+    ascii_terms = re.findall(r"[a-z0-9]+", query.lower())
     cjk_chars = {
         char
-        for char in re.findall(r"[\u4e00-\u9fff]", question)
+        for char in re.findall(r"[\u4e00-\u9fff]", query)
         if char not in CJK_STOP_CHARS
     }
     total_units = len(ascii_terms) + len(cjk_chars)

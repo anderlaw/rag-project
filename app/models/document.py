@@ -239,3 +239,50 @@ class RagEvalCase(Base):
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
     )
+
+
+class RagSynonymGroup(Base):
+    __tablename__ = "rag_synonym_groups"
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE', 'INACTIVE')", name="chk_rag_synonym_groups_status"),
+        Index("idx_rag_synonym_groups_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+class RagSynonymTerm(Base):
+    __tablename__ = "rag_synonym_terms"
+    __table_args__ = (
+        UniqueConstraint("group_id", "term", name="uq_rag_synonym_terms_group_term"),
+        CheckConstraint("term_type IN ('CANONICAL', 'SYNONYM')", name="chk_rag_synonym_terms_type"),
+        CheckConstraint("status IN ('ACTIVE', 'INACTIVE')", name="chk_rag_synonym_terms_status"),
+        CheckConstraint("weight >= 0", name="chk_rag_synonym_terms_weight"),
+        Index("idx_rag_synonym_terms_group", "group_id"),
+        Index("idx_rag_synonym_terms_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    term: Mapped[str] = mapped_column(Text, nullable=False)
+    term_type: Mapped[str] = mapped_column(Text, nullable=False, default="SYNONYM")
+    language: Mapped[str] = mapped_column(Text, nullable=False, default="mixed")
+    weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )

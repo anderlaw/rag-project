@@ -56,6 +56,21 @@ class EvalCaseCreatedFrom(StrEnum):
     CSV_IMPORT = "CSV_IMPORT"
 
 
+class SynonymGroupStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+class SynonymTermType(StrEnum):
+    CANONICAL = "CANONICAL"
+    SYNONYM = "SYNONYM"
+
+
+class SynonymTermStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
 class DebugQueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     search_profile_id: int | None = None
@@ -221,3 +236,71 @@ class EvalCaseResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SynonymTermCreate(BaseModel):
+    term: str = Field(min_length=1, max_length=200)
+    term_type: SynonymTermType = SynonymTermType.SYNONYM
+    language: str = Field(default="mixed", min_length=1, max_length=20)
+    weight: float = Field(default=1.0, ge=0)
+    status: SynonymTermStatus = SynonymTermStatus.ACTIVE
+
+
+class SynonymTermUpdate(BaseModel):
+    term: str | None = Field(default=None, min_length=1, max_length=200)
+    term_type: SynonymTermType | None = None
+    language: str | None = Field(default=None, min_length=1, max_length=20)
+    weight: float | None = Field(default=None, ge=0)
+    status: SynonymTermStatus | None = None
+
+
+class SynonymGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    status: SynonymGroupStatus = SynonymGroupStatus.ACTIVE
+    terms: list[SynonymTermCreate] = Field(default_factory=list)
+
+
+class SynonymGroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    status: SynonymGroupStatus | None = None
+
+
+class SynonymTermResponse(BaseModel):
+    id: int
+    group_id: int
+    term: str
+    term_type: SynonymTermType
+    language: str
+    weight: float
+    status: SynonymTermStatus
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SynonymGroupResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    status: SynonymGroupStatus
+    terms: list[SynonymTermResponse]
+    created_at: datetime
+    updated_at: datetime
+
+
+class SynonymGroupListResponse(BaseModel):
+    items: list[SynonymGroupResponse]
+
+
+class NormalizeQueryRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+
+
+class NormalizeQueryResponse(BaseModel):
+    original_text: str
+    normalized_text: str
+    expanded_text: str
+    applied_synonym_groups: list[str] = Field(default_factory=list)

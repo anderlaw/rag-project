@@ -1,4 +1,4 @@
-import { Database, FileSearch, FileText } from "lucide-react";
+import { BookOpenText, Database, FileSearch, FileText } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
 export function AppLayout() {
@@ -17,6 +17,10 @@ export function AppLayout() {
           <NavLink to="/rag/debug" className={({ isActive }) => `nav-item ${isActive ? "nav-item-active" : ""}`}>
             <FileSearch size={18} />
             检索调试
+          </NavLink>
+          <NavLink to="/rag/synonyms" className={({ isActive }) => `nav-item ${isActive ? "nav-item-active" : ""}`}>
+            <BookOpenText size={18} />
+            检索词典
           </NavLink>
         </nav>
       </aside>

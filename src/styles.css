@@ -899,6 +899,157 @@ select {
   font-size: 14px;
 }
 
+.synonym-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(320px, 1.05fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.synonym-form {
+  display: grid;
+  gap: 12px;
+}
+
+.synonym-form label,
+.synonym-group-header label,
+.synonym-add-term label {
+  display: grid;
+  gap: 6px;
+  color: #667085;
+  font-size: 13px;
+}
+
+.synonym-form .plain-input,
+.synonym-add-term .plain-input {
+  max-width: none;
+}
+
+.synonym-form textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #18212f;
+  line-height: 1.5;
+  outline: 0;
+}
+
+.normalization-result {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.normalization-result div {
+  border: 1px solid #e5e9ef;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+
+.normalization-result dt {
+  color: #667085;
+  font-size: 12px;
+}
+
+.normalization-result dd {
+  overflow-wrap: anywhere;
+  margin: 4px 0 0;
+  color: #18212f;
+}
+
+.synonym-list-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.synonym-group-list {
+  display: grid;
+  gap: 12px;
+}
+
+.synonym-group-item {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #e5e9ef;
+  border-radius: 8px;
+  padding: 14px;
+  background: #ffffff;
+}
+
+.synonym-group-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.synonym-group-header h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 16px;
+}
+
+.synonym-group-header p {
+  margin: 4px 0 0;
+  color: #667085;
+}
+
+.synonym-term-bucket {
+  display: grid;
+  gap: 8px;
+}
+
+.synonym-term-bucket > span {
+  color: #667085;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.synonym-term-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.synonym-term-chip {
+  display: inline-grid;
+  grid-template-columns: auto auto auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d7dee8;
+  border-radius: 999px;
+  padding: 4px 6px 4px 10px;
+  background: #f8fafc;
+}
+
+.synonym-term-chip strong {
+  color: #18212f;
+  font-size: 13px;
+}
+
+.synonym-term-chip small {
+  color: #667085;
+}
+
+.synonym-term-chip select {
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.synonym-add-term {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 160px auto;
+  align-items: end;
+  gap: 10px;
+  border-top: 1px solid #e5e9ef;
+  padding-top: 12px;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -946,6 +1097,7 @@ select {
   .detail-grid,
   .chunks-grid,
   .debug-grid,
+  .synonym-workbench,
   .diagnostics-metrics,
   .chunk-detail-grid,
   .chunk-detail-content-grid {
@@ -973,6 +1125,16 @@ select {
   }
 
   .case-save-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .synonym-group-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .synonym-add-term,
+  .synonym-term-chip {
     grid-template-columns: 1fr;
   }
 }

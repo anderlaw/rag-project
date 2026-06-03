@@ -9,13 +9,30 @@ from app.schemas.rag import (
     DebugQueryResponse,
     EvalCaseResponse,
     FailureCaseResponse,
+    NormalizeQueryRequest,
+    NormalizeQueryResponse,
     QueryLogDetailResponse,
+    SynonymGroupCreate,
+    SynonymGroupListResponse,
+    SynonymGroupResponse,
+    SynonymGroupUpdate,
+    SynonymTermCreate,
+    SynonymTermResponse,
+    SynonymTermUpdate,
 )
 from app.services.rag_debug_service import (
     create_eval_case_from_query_log,
     create_failure_case_from_query_log,
     get_query_log_detail,
     run_debug_query,
+)
+from app.services.synonym_service import (
+    add_synonym_term,
+    create_synonym_group,
+    list_synonym_groups,
+    normalize_query,
+    update_synonym_group,
+    update_synonym_term,
 )
 
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -24,6 +41,49 @@ router = APIRouter(prefix="/rag", tags=["rag"])
 @router.post("/debug-query", response_model=DebugQueryResponse)
 def debug_query(request: DebugQueryRequest, db: Session = Depends(get_db)) -> DebugQueryResponse:
     return run_debug_query(db, request)
+
+
+@router.get("/synonyms", response_model=SynonymGroupListResponse)
+def list_synonyms(db: Session = Depends(get_db)) -> SynonymGroupListResponse:
+    return list_synonym_groups(db)
+
+
+@router.post("/synonyms", response_model=SynonymGroupResponse)
+def create_synonym(request: SynonymGroupCreate, db: Session = Depends(get_db)) -> SynonymGroupResponse:
+    return create_synonym_group(db, request)
+
+
+@router.patch("/synonyms/{group_id}", response_model=SynonymGroupResponse)
+def update_synonym(group_id: int, request: SynonymGroupUpdate, db: Session = Depends(get_db)) -> SynonymGroupResponse:
+    group = update_synonym_group(db, group_id, request)
+    if group is None:
+        raise HTTPException(status_code=404, detail="synonym group not found")
+    return group
+
+
+@router.post("/synonyms/{group_id}/terms", response_model=SynonymTermResponse)
+def create_synonym_term(group_id: int, request: SynonymTermCreate, db: Session = Depends(get_db)) -> SynonymTermResponse:
+    term = add_synonym_term(db, group_id, request)
+    if term is None:
+        raise HTTPException(status_code=404, detail="synonym group not found")
+    return term
+
+
+@router.patch("/synonyms/terms/{term_id}", response_model=SynonymTermResponse)
+def update_synonym_term_endpoint(
+    term_id: int,
+    request: SynonymTermUpdate,
+    db: Session = Depends(get_db),
+) -> SynonymTermResponse:
+    term = update_synonym_term(db, term_id, request)
+    if term is None:
+        raise HTTPException(status_code=404, detail="synonym term not found")
+    return term
+
+
+@router.post("/normalize-query", response_model=NormalizeQueryResponse)
+def normalize_query_endpoint(request: NormalizeQueryRequest, db: Session = Depends(get_db)) -> NormalizeQueryResponse:
+    return normalize_query(db, request)
 
 
 @router.get("/query-logs/{query_log_id}", response_model=QueryLogDetailResponse)
