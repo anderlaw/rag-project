@@ -13,12 +13,13 @@
 7. Chunk 生成方案
 8. 向量检索方案
 9. 混合检索方案
-10. 调试与日志方案
-11. 用户反馈与失败案例方案
-12. 测试用例录入、审核与评估方案
-13. 技术选型与插件
-14. 核心伪代码
-15. 开发落地顺序
+10. 结构化检索质量优化方案
+11. 调试与日志方案
+12. 用户反馈与失败案例方案
+13. 测试用例录入、审核与评估方案
+14. 技术选型与插件
+15. 核心伪代码
+16. 开发落地顺序
 
 ---
 
@@ -460,7 +461,7 @@ CREATE TABLE rag_documents (
 
 COMMENT ON TABLE rag_documents IS '文档主表，保存文档基础信息，一个文档可以有多个版本';
 COMMENT ON COLUMN rag_documents.id IS '文档主键 ID';
-COMMENT ON COLUMN rag_documents.name IS '文档名称，例如 公司报销制度.pdf';
+COMMENT ON COLUMN rag_documents.name IS '文档文件名或用户指定名称，例如 公司报销制度.pdf；该字段不保证有语义，检索中只能作为弱辅助信号';
 COMMENT ON COLUMN rag_documents.file_type IS '文件类型，例如 pdf、txt、md、docx';
 COMMENT ON COLUMN rag_documents.file_size IS '文件大小，单位 byte';
 COMMENT ON COLUMN rag_documents.current_version_id IS '当前生效版本 ID，正常问答只检索该版本的 chunk';
@@ -474,7 +475,7 @@ COMMENT ON COLUMN rag_documents.updated_at IS '文档最近更新时间';
 | 字段                 | 类型        | 说明     |
 | ------------------ | --------- | ------ |
 | id                 | BIGSERIAL | 文档主键   |
-| name               | TEXT      | 文档名称   |
+| name               | TEXT      | 文档文件名或用户指定名称，检索中只能作为弱辅助信号 |
 | file_type          | TEXT      | 文件类型   |
 | file_size          | BIGINT    | 文件大小   |
 | current_version_id | BIGINT    | 当前生效版本 |
@@ -691,11 +692,11 @@ COMMENT ON COLUMN rag_chunks.page_end IS 'chunk 结束页码，主要用于 PDF'
 COMMENT ON COLUMN rag_chunks.start_char IS 'chunk 在原始文本中的起始字符位置';
 COMMENT ON COLUMN rag_chunks.end_char IS 'chunk 在原始文本中的结束字符位置';
 COMMENT ON COLUMN rag_chunks.content IS '原始 chunk 内容，用于展示给用户';
-COMMENT ON COLUMN rag_chunks.content_with_context IS '带文档名、标题、页码的上下文文本，CHILD 必填，用于生成 embedding';
+COMMENT ON COLUMN rag_chunks.content_with_context IS '带标题、页码等必要上下文的文本，CHILD 必填，用于生成 embedding；不应无条件混入无意义文件名';
 COMMENT ON COLUMN rag_chunks.content_hash IS 'chunk 内容 hash，用于判断是否变化和去重';
 COMMENT ON COLUMN rag_chunks.token_count IS 'chunk token 或字符数量估算';
 COMMENT ON COLUMN rag_chunks.embedding IS 'embedding 向量，通常只给 CHILD chunk 生成';
-COMMENT ON COLUMN rag_chunks.search_text IS '用于关键词和模糊检索的文本，通常包含文档名、标题、正文';
+COMMENT ON COLUMN rag_chunks.search_text IS '用于关键词和模糊检索的文本，按 document_name、heading_path、section_title、content 结构化拼接；无意义文件名应省略或仅作弱信号';
 COMMENT ON COLUMN rag_chunks.search_tsv IS 'PostgreSQL Full Text Search 使用的 tsvector 字段';
 COMMENT ON COLUMN rag_chunks.created_at IS 'chunk 创建时间';
 ```
@@ -722,7 +723,7 @@ COMMENT ON COLUMN rag_chunks.created_at IS 'chunk 创建时间';
 | content_hash         | TEXT         | 内容 hash             |
 | token_count          | INT          | token 数             |
 | embedding            | VECTOR(1536) | PARENT 为空，CHILD 必填 |
-| search_text          | TEXT         | 关键词检索文本             |
+| search_text          | TEXT         | 关键词和模糊检索文本，结构化包含有意义文件名、标题路径、当前章节标题和正文 |
 | search_tsv           | tsvector     | 全文检索向量              |
 | created_at           | TIMESTAMP    | 创建时间                |
 
@@ -748,6 +749,52 @@ embedding 维度必须与实际 embedding 模型输出一致；如果模型不�
 | embedding          | 空      | 必填    |
 | search_text        | 可填     | 必填    |
 | search_tsv         | 可生成    | 可生成   |
+
+检索字段语义与落地规则：
+
+```txt
+rag_chunks.content 是原始 chunk 正文，只用于展示、Prompt 拼接和正文匹配。
+rag_chunks.section_title 是当前 chunk 所属的最近一级标题，例如 1.2 技术栈。
+rag_chunks.heading_path 是完整标题路径，例如 AI获客数据权限相关 / 一、项目概览 / 1.2 技术栈。
+rag_documents.name 是文件名或用户指定名称，例如 AI获客数据权限相关.md；它不是文档内部标题，不保证有业务语义。
+
+关键词和模糊检索不能只把这些字段拼成一段 flat text 后统一打分。
+服务层必须保留字段边界，分别计算 document_name_score、heading_score、section_score、content_score。
+section_title 命中表示用户问题直接命中了当前小节标题，通常是最强结构信号。
+heading_path 命中表示用户问题命中了标题路径中的任意层级，召回更宽，但精度低于 section_title。
+content 命中表示用户问题命中了正文，属于基础信号；正文散词命中不应压过标题精准命中。
+document_name 命中只作为弱辅助信号，并且必须先判断文件名是否有意义。
+```
+
+search_text 构造规则：
+
+```txt
+search_text 用于数据库层初步召回，不等同于最终排序分数。
+推荐按带标签的结构化文本拼接，方便后续调试和回放：
+
+[document_name] AI获客数据权限相关
+[heading_path] 一、项目概览 / 1.2 技术栈
+[section_title] 1.2 技术栈
+[content]
+后端使用 FastAPI + PostgreSQL + Redis，前端使用 React + Vite + TanStack Query。
+
+如果 document_name 是无意义文件名，应从 search_text 中省略 document_name 行，或保留但不参与 boost。
+无意义文件名包括但不限于：
+文档.md、新建文档.md、未命名.pdf、document.pdf、test.md、1.md、纯数字、纯日期、扫描件.pdf、副本.docx。
+
+heading_path 和 section_title 可以同时写入 search_text。
+这样做不是为了让数据库分数直接代表最终相关性，而是为了提高候选召回概率。
+最终排序仍由字段感知评分逻辑决定。
+```
+
+content_with_context 构造规则：
+
+```txt
+content_with_context 主要用于 embedding 和 Prompt 上下文，不应为了关键词召回而塞入过多检索噪声。
+推荐包含 heading_path、页码或位置、正文。
+document_name 只有在有明确业务语义时才可加入 content_with_context。
+如果文件名只是 文档.md / 未命名.pdf / 1.pdf，加入 embedding 输入会污染向量语义，应跳过。
+```
 
 索引：
 
@@ -1013,6 +1060,33 @@ COMMENT ON COLUMN rag_query_candidates.created_at IS '候选记录创建时间';
 | section_title_snapshot | TEXT      | 章节快照        |
 | content_snapshot       | TEXT      | 内容快照        |
 | created_at             | TIMESTAMP | 创建时间        |
+
+检索解释性扩展建议：
+
+```txt
+MVP 可以继续只保存 vector_score、keyword_score、trgm_score、final_score。
+字段感知评分、标题 boost、目录型 chunk 降权可以先在 service 层计算，不强制新增数据库字段。
+
+如果后续 QueryLogDetailPage 需要解释“为什么这个 chunk 排在这里”，建议新增：
+
+score_detail JSONB
+
+示例：
+{
+  "document_name_score": 0.0,
+  "heading_score": 0.92,
+  "section_score": 1.0,
+  "content_score": 0.38,
+  "keyword_score_before_quality": 1.0,
+  "quality_multiplier": 0.45,
+  "directory_like": true,
+  "matched_terms": ["技术栈", "技术选型"],
+  "matched_field": "section_title"
+}
+
+score_detail 只是调试快照，不参与后续重新计算。
+历史 query log 必须保留当时的分数明细，避免检索算法升级后无法复现旧问题。
+```
 
 ---
 
@@ -2508,6 +2582,94 @@ async def ingest_document(file, db, document_id=None):
 如果处理失败，需要清理该失败版本已写入的临时 chunks，或保证正常检索永远只过滤 current_version_id。
 ```
 
+search_text 与 embedding_text 的职责分离：
+
+```txt
+embedding_text：用于语义向量，优先使用 content_with_context。
+content_with_context 应包含 heading_path + content，必要时包含页码或位置。
+如果 document_name 没有业务语义，不要加入 embedding_text。
+
+search_text：用于 KEYWORD / TRIGRAM 候选召回。
+search_text 可以包含有意义 document_name、heading_path、section_title、content。
+search_text 推荐带字段标签拼接，避免后续调试时看不出文本来源。
+
+字段感知最终评分不能直接依赖 search_text。
+最终排序要用 rag_documents.name、rag_chunks.heading_path、rag_chunks.section_title、rag_chunks.content 分字段重新计算。
+```
+
+build_search_text 伪代码：
+
+```python
+MEANINGLESS_DOCUMENT_NAMES = {
+    "文档",
+    "新建文档",
+    "未命名",
+    "document",
+    "test",
+    "扫描件",
+    "副本",
+}
+
+
+def normalize_file_stem(document_name: str) -> str:
+    # 去掉扩展名、空白、常见副本后缀，只保留可读名称。
+    # 示例：AI获客数据权限相关.md -> AI获客数据权限相关
+    # 示例：文档.md -> 文档
+    return strip_extension(document_name).strip()
+
+
+def is_meaningful_document_name(document_name: str) -> bool:
+    stem = normalize_file_stem(document_name).lower()
+
+    if not stem:
+        return False
+
+    if stem in MEANINGLESS_DOCUMENT_NAMES:
+        return False
+
+    if re.fullmatch(r"\d+", stem):
+        return False
+
+    if re.fullmatch(r"\d{4}[-_年]?\d{1,2}[-_月]?\d{1,2}日?", stem):
+        return False
+
+    if len(stem) <= 2 and not contains_business_word(stem):
+        return False
+
+    return True
+
+
+def build_search_text(document_name, heading_path, section_title, content):
+    parts = []
+
+    if is_meaningful_document_name(document_name):
+        parts.append(f"[document_name] {normalize_file_stem(document_name)}")
+
+    if heading_path:
+        parts.append(f"[heading_path] {clean_heading_text(heading_path)}")
+
+    if section_title:
+        parts.append(f"[section_title] {clean_heading_text(section_title)}")
+
+    parts.append("[content]")
+    parts.append(content.strip())
+
+    return "\n".join(part for part in parts if part)
+```
+
+历史数据处理：
+
+```txt
+本优化不要求立刻重切所有历史文档。
+原因是 rag_chunks 已经保存 heading_path、section_title、content，字段感知评分可以直接作用于现有 chunk。
+增强 search_text 主要影响数据库层候选召回，尤其是 document_name 召回。
+因为 document_name 本轮只作为弱信号，历史数据不回填也不会阻塞技术栈/技术选型这类标题命中优化。
+
+如果后续确实需要用有意义文件名参与候选召回，可以单独做 backfill：
+遍历 ACTIVE 文档当前版本 chunk，按 build_search_text 重写 rag_chunks.search_text 和 search_tsv。
+backfill 不应修改 content、content_with_context、embedding。
+```
+
 ---
 
 # 9. Chunk 生成实现方案
@@ -2670,6 +2832,9 @@ def build_parent_child_chunks(document, version, blocks):
 chunker 不生成临时 parent_chunk_id。
 parent_chunk_id 只能在 parent chunk 落库拿到真实 ID 后回填。
 写入 child 前，repo 层必须校验 parent_chunk_id 指向同一 document_version 下的 PARENT 行。
+build_context_text 中的 document_name 参数必须先经过 is_meaningful_document_name 判断。
+如果 document.name 是 文档.md、未命名.pdf、1.pdf 等无意义文件名，content_with_context 不应包含该名称。
+heading_path 和 section_title 是比 document_name 更可靠的结构信号，应优先保留。
 ```
 
 ---
@@ -2710,6 +2875,7 @@ SELECT
   c.document_version_id,
   d.name AS document_name,
   c.section_title,
+  c.heading_path,
   c.content,
   ts_rank_cd(c.search_tsv, plainto_tsquery('simple', :query)) AS keyword_score
 FROM rag_chunks c
@@ -2727,6 +2893,8 @@ LIMIT :keyword_top_k;
 ```txt
 plainto_tsquery('simple', :query) 对中文没有真正分词能力。
 如果知识库以中文为主，MVP 可以先把全文检索作为辅助召回；正式版本应接入中文分词方案，例如 pg_jieba、外部分词后写入 search_tsv，或使用关键词抽取结果构造 tsquery。
+SQL keyword_score 只作为候选召回的初始分数，不直接代表最终 keyword_score。
+服务层拿到候选后，必须基于 document_name、heading_path、section_title、content 重新计算字段感知 keyword_score。
 ```
 
 ---
@@ -2741,6 +2909,7 @@ SELECT
   c.document_version_id,
   d.name AS document_name,
   c.section_title,
+  c.heading_path,
   c.content,
   similarity(c.search_text, :query) AS trgm_score
 FROM rag_chunks c
@@ -2751,6 +2920,15 @@ WHERE c.chunk_type = 'CHILD'
   AND c.search_text % :query
 ORDER BY trgm_score DESC
 LIMIT :trgm_top_k;
+```
+
+模糊检索说明：
+
+```txt
+trgm_score 也应区分数据库召回分和服务层最终分。
+数据库层使用 c.search_text 做宽召回。
+服务层应分别计算 heading_path、section_title、content、document_name 的相似度，再按字段权重融合。
+这样可以避免目录型 chunk 或无意义文件名因为 search_text 字面相似而排到真实内容前面。
 ```
 
 ---
@@ -2843,6 +3021,296 @@ keyword_score：MVP 优先按 query term 覆盖率计算；中文问题需要过
 trgm_score：pg_trgm similarity 本身通常为 0~1，仍需 clamp 到 0~1。
 ```
 
+## 10.4.1 字段感知 keyword/trigram 评分
+
+当前优化目标：
+
+```txt
+不要把 document_name、heading_path、section_title、content 拼成一段文本后统一打分。
+统一打分会把“标题命中”和“正文散词命中”混在一起，无法表达结构化语义。
+正确做法是在服务层分别计算字段分数，再按字段可靠性融合。
+```
+
+字段优先级：
+
+```txt
+section_title：当前 chunk 最近一级标题，精度最高。
+heading_path：完整标题路径，包含上级标题，召回更宽，精度略低于 section_title。
+content：正文内容，是基础相关性来源。
+document_name：文件名或用户指定名称，只能作为弱辅助信号，且必须先判断是否有意义。
+```
+
+section_score 与 heading_score 区别：
+
+```txt
+section_score 只看当前小节标题。
+例如 section_title = 1.2 技术栈。
+当用户问题是“AI智能获客技术栈是什么”时，命中 section_title 说明当前 chunk 很可能就是目标小节。
+
+heading_score 看完整路径。
+例如 heading_path = AI获客数据权限相关 / 一、项目概览 / 1.2 技术栈。
+当用户问题包含“项目概览 技术栈”或“AI获客 技术栈”时，heading_path 可以捕捉父级上下文。
+但 heading_path 也可能因为父级标题宽泛而误命中，所以权重应低于 section_title。
+```
+
+推荐公式：
+
+```python
+def field_aware_keyword_score(query, chunk, document_name, normalized_query):
+    # normalized_query.expanded_text 已包含数据库同义词扩展。
+    # 例如 技术栈 -> 技术栈 技术选型 技术方案 技术框架 tech stack。
+    query_texts = [
+        normalized_query.normalized_text,
+        normalized_query.expanded_text,
+    ]
+
+    document_name_score = 0.0
+    if is_meaningful_document_name(document_name):
+        document_name_score = max(score_text(q, normalize_file_stem(document_name)) for q in query_texts)
+
+    heading_score = max(score_text(q, clean_heading_text(chunk.heading_path or "")) for q in query_texts)
+    section_score = max(score_text(q, clean_heading_text(chunk.section_title or "")) for q in query_texts)
+    content_score = max(score_text(q, chunk.content or "") for q in query_texts)
+
+    # 标题命中应明显高于正文散词命中。
+    # section_title 是最精准结构信号，heading_path 次之。
+    boosted_section = section_score * 1.35
+    boosted_heading = heading_score * 1.20
+
+    # document_name 只做弱信号，不能压过标题和正文。
+    boosted_document = document_name_score * 0.45
+
+    # weighted_mix 防止某个字段轻微命中导致完全覆盖正文强命中。
+    weighted_mix = (
+        section_score * 0.35
+        + heading_score * 0.25
+        + content_score * 0.35
+        + document_name_score * 0.05
+    )
+
+    raw_score = max(
+        boosted_section,
+        boosted_heading,
+        boosted_document,
+        content_score,
+        weighted_mix,
+    )
+
+    return clamp(raw_score, 0, 1)
+```
+
+落地注释：
+
+```txt
+score_text 可以继续使用现有 query term 覆盖率、中文有效字符覆盖率、短语完整命中逻辑。
+不要为了标题 boost 单独引入 LLM。
+所有字段分数都必须 clamp 到 0~1。
+boost 只用于表达结构化字段可靠性，不表示相关性可以超过 1。
+如果 section_title 精准命中“技术选型”，即使 content 里只是散落出现“技术”“栈”等字，也应让标题命中的 chunk 排在正文散词 chunk 前面。
+如果 content 中完整出现用户问题或完整答案要点，content_score 仍然可以很高，不应被无意义标题压制。
+```
+
+trigram 字段感知规则：
+
+```python
+def field_aware_trgm_score(query, chunk, document_name, normalized_query):
+    document_name_score = 0.0
+    if is_meaningful_document_name(document_name):
+        document_name_score = trgm(query, normalize_file_stem(document_name))
+
+    heading_score = trgm(query, clean_heading_text(chunk.heading_path or ""))
+    section_score = trgm(query, clean_heading_text(chunk.section_title or ""))
+    content_score = trgm(query, chunk.content or "")
+
+    return clamp(
+        max(
+            section_score * 1.20,
+            heading_score * 1.10,
+            content_score,
+            document_name_score * 0.40,
+        ),
+        0,
+        1,
+    )
+```
+
+说明：
+
+```txt
+trigram 容易被短文本、文件名、目录串误伤，因此 document_name 权重更低。
+trigram 更适合补充召回，不应单独决定最终答案来源。
+```
+
+## 10.4.2 document_name 弱信号与无意义文件名过滤
+
+规则：
+
+```txt
+document_name 当前来自 rag_documents.name，通常是上传文件名。
+它不是文档内部标题。
+如果用户随便上传了 文档.md、未命名.pdf、1.pdf，这个字段没有任何业务语义。
+因此 document_name 不允许作为强 boost。
+```
+
+无意义文件名判断：
+
+```python
+def is_meaningful_document_name(document_name):
+    stem = normalize_file_stem(document_name)
+    lowered = stem.lower()
+
+    if lowered in {"文档", "新建文档", "未命名", "document", "test", "扫描件", "副本"}:
+        return False
+
+    if re.fullmatch(r"\d+", lowered):
+        return False
+
+    if re.fullmatch(r"\d{4}[-_年]?\d{1,2}[-_月]?\d{1,2}日?", lowered):
+        return False
+
+    if len(lowered) <= 2:
+        return False
+
+    return True
+```
+
+落地注释：
+
+```txt
+如果 document_name 无意义：
+1. build_search_text 可以不写入 document_name。
+2. field_aware_keyword_score 中 document_name_score 必须为 0。
+3. field_aware_trgm_score 中 document_name_score 必须为 0。
+
+如果 document_name 有意义，例如 AI获客数据权限相关.md：
+它可以帮助“AI获客 技术栈”这类 query 做弱召回。
+但它仍然不能超过 section_title 和 content 的真实命中。
+```
+
+未来扩展：
+
+```txt
+如果需要真正的文档标题，应新增 rag_documents.title 或 rag_document_versions.extracted_title。
+title 可以来自 Markdown 一级标题、PDF metadata title、用户手工填写或后续 LLM 入库增强。
+不要把 title 和 name 混用。
+```
+
+## 10.4.3 目录型 chunk 降权
+
+问题：
+
+```txt
+目录型 chunk 经常包含大量章节标题：
+1. 前端技术栈
+2. 页面结构
+3. 状态管理
+4. 接口设计
+
+这种 chunk 会命中很多 query 关键词，但它通常没有答案正文。
+如果不降权，它可能压过真正说明技术栈内容的 chunk。
+```
+
+目录型 chunk 识别规则：
+
+```python
+def is_directory_like_chunk(content):
+    clean = clean_markdown_noise(content)
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+
+    if len(lines) < 3:
+        return False
+
+    list_like_count = sum(
+        1
+        for line in lines
+        if re.match(r"^(\d+[\.\、)]|[一二三四五六七八九十]+[、.]|[-*•]|#{1,6}\s+)", line)
+    )
+
+    short_line_count = sum(1 for line in lines if len(line) <= 40)
+    prose_line_count = sum(1 for line in lines if re.search(r"[。！？；：:]", line) and len(line) > 30)
+
+    list_like_ratio = list_like_count / len(lines)
+    short_line_ratio = short_line_count / len(lines)
+
+    return (
+        list_like_ratio >= 0.60
+        and short_line_ratio >= 0.60
+        and prose_line_count == 0
+    )
+```
+
+降权方式：
+
+```python
+def quality_multiplier(chunk):
+    if is_low_information_chunk(chunk):
+        return 0.0
+
+    if is_directory_like_chunk(chunk.content):
+        return 0.45
+
+    return 1.0
+```
+
+final_score 应用方式：
+
+```python
+candidate.final_score = weighted_score(candidate)
+candidate.final_score = candidate.final_score * quality_multiplier(candidate.chunk)
+candidate.final_score = clamp(candidate.final_score, 0, 1)
+```
+
+落地注释：
+
+```txt
+目录型 chunk 不建议直接过滤。
+原因是有些文档目录也可能帮助用户定位章节。
+但它不应进入 Prompt，除非没有更好的真实内容 chunk。
+推荐先降权到 0.35~0.55。
+
+当前已有低信息过滤，例如 ---、```、空白分隔符。
+目录型 chunk 与低信息 chunk 不同：
+低信息 chunk 可以直接跳过。
+目录型 chunk 应保留为候选但降低 final_score。
+```
+
+误杀保护：
+
+```txt
+技术栈表格不应被误判为目录型 chunk。
+例如：
+| 层级 | 技术 |
+| 后端 | FastAPI + PostgreSQL + Redis |
+| 前端 | React + Vite + TanStack Query |
+
+虽然它短，但它包含结构化事实和答案内容，不是纯章节列表。
+is_directory_like_chunk 应重点识别“多行短标题列表”，而不是所有短文本或所有表格。
+```
+
+## 10.4.4 与 Query Normalization / 同义词词典的关系
+
+```txt
+字段感知评分必须使用 normalized_query.expanded_text。
+例如用户问“AI智能获客技术栈是什么”：
+
+原始 query：AI智能获客技术栈是什么
+清洗后 query：AI智能获客技术栈
+扩展后 query：AI智能获客技术栈 技术选型 技术方案 技术框架 tech stack
+
+如果 chunk.section_title = 3. 技术选型：
+section_score 应能通过扩展词“技术选型”命中。
+
+这类命中应该高于正文里零散出现“技术”“方案”“框架”等字的 chunk。
+```
+
+实现要求：
+
+```txt
+同义词必须从 rag_synonym_groups / rag_synonym_terms 读取。
+不允许在检索代码里硬编码 QUERY_SYNONYMS。
+调试接口 POST /api/v1/rag/normalize-query 用于验证 query 清洗和扩展结果。
+```
+
 ---
 
 ## 10.5 选择最终 chunks
@@ -2875,6 +3343,10 @@ def select_final_chunks(candidates, final_top_k, min_final_score):
 
 ```txt
 通过 parent_id 去重，避免同一个父 chunk 下多个 child 重复进入 prompt。
+排序前必须已经应用 quality_multiplier。
+低信息 chunk，例如空白、分隔符、代码围栏标记，应在选择阶段直接跳过。
+目录型 chunk 通常不直接跳过，而是通过 quality_multiplier 降低 final_score。
+如果目录型 chunk 被降权后仍进入 Prompt，说明当前没有更高质量的真实内容 chunk，需要在 DebugPage 中暴露候选明细继续分析。
 ```
 
 ---
@@ -3676,7 +4148,30 @@ parent chunk 不要过大。
 
 ---
 
-## 阶段五：优化闭环
+## 阶段五：结构化检索质量优化
+
+```txt
+1. Query Normalization 从 rag_synonym_groups / rag_synonym_terms 读取同义词，不在代码中硬编码词典。
+2. build_search_text 写入有意义 document_name、heading_path、section_title、content。
+3. document_name 只作为弱辅助信号，并过滤 文档.md / 未命名.pdf / 1.pdf 等无意义文件名。
+4. keyword_score 改为字段感知评分，分别计算 document_name_score、heading_score、section_score、content_score。
+5. trgm_score 改为字段感知评分，避免短文件名或目录串误伤。
+6. section_title 命中加最高结构化 boost，heading_path 命中加次级 boost。
+7. 目录型 chunk 使用 quality_multiplier 降权，不直接压过真实内容 chunk。
+8. DebugPage / QueryLogDetailPage 继续展示 vector_score、keyword_score、trgm_score、final_score；后续如需解释明细，可新增 score_detail JSONB。
+```
+
+说明：
+
+```txt
+该阶段不需要引入 LLM。
+标题 boost、文件名过滤、目录型 chunk 降权均使用规则实现，保证可解释、可测试、可复现。
+LLM 后续可以用于文档标题抽取或 query rewrite，但不放入本阶段检索主链路。
+```
+
+---
+
+## 阶段六：优化闭环
 
 ```txt
 1. 用户反馈
@@ -3712,6 +4207,12 @@ debug-query use_llm=false 能返回 candidates。
 candidates 包含 vector_score、keyword_score、trgm_score、final_score。
 selected_for_prompt 正确标记。
 只检索当前版本 chunk。
+Query Normalization 使用数据库同义词词典，不使用代码硬编码 QUERY_SYNONYMS。
+问题命中 section_title 时，相关 chunk 的 keyword_score 应明显高于只命中正文散词的 chunk。
+问题命中 heading_path 时，应有结构化 boost，但不得高于 section_title 精准命中。
+无意义 document_name 不参与 boost，例如 文档.md、未命名.pdf、1.pdf。
+目录型 chunk 会被降权，不应压过包含真实答案内容的 chunk。
+技术栈 / 技术选型 / 技术方案 / 技术框架 等同义词扩展后，应能命中标题为“技术选型”的 chunk。
 ```
 
 ---
