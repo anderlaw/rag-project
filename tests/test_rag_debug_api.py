@@ -147,6 +147,98 @@ def test_debug_query_does_not_select_separator_chunks(client):
     assert "---\n\n---" not in body["prompt"]["text"]
 
 
+def test_debug_query_downweights_directory_chunks_below_real_content(client):
+    from app.core.database import get_session
+    from app.models.document import RagChunk, RagDocument, RagDocumentVersion
+
+    synonym_response = client.post(
+        "/api/v1/rag/synonyms",
+        json={
+            "name": "技术栈",
+            "terms": [
+                {"term": "技术栈", "term_type": "CANONICAL"},
+                {"term": "技术选型", "term_type": "SYNONYM"},
+                {"term": "技术方案", "term_type": "SYNONYM"},
+                {"term": "技术框架", "term_type": "SYNONYM"},
+            ],
+        },
+    )
+    assert synonym_response.status_code == 200
+
+    with get_session() as db:
+        document = RagDocument(name="文档.md", file_type="md", file_size=100, status="ACTIVE")
+        db.add(document)
+        db.flush()
+
+        version = RagDocumentVersion(
+            document_id=document.id,
+            version_no=1,
+            file_hash="hash",
+            original_filename=document.name,
+            status="COMPLETED",
+            chunk_count=2,
+        )
+        db.add(version)
+        db.flush()
+        document.current_version_id = version.id
+
+        db.add(
+            RagChunk(
+                document_id=document.id,
+                document_version_id=version.id,
+                chunk_type="CHILD",
+                chunk_index=0,
+                child_index=0,
+                section_title="目录",
+                heading_path="目录",
+                content="1. 前端技术栈\n2. 页面结构\n3. 状态管理\n4. 接口设计",
+                content_with_context="目录\n\n1. 前端技术栈\n2. 页面结构\n3. 状态管理\n4. 接口设计",
+                search_text="目录\n\n1. 前端技术栈\n2. 页面结构\n3. 状态管理\n4. 接口设计",
+            )
+        )
+        db.add(
+            RagChunk(
+                document_id=document.id,
+                document_version_id=version.id,
+                chunk_type="CHILD",
+                chunk_index=1,
+                child_index=0,
+                section_title="3. 技术选型",
+                heading_path="系统设计 / 3. 技术选型",
+                content="前端采用 React、Vite 和 TanStack Query；后端采用 FastAPI 和 PostgreSQL。",
+                content_with_context=(
+                    "系统设计 / 3. 技术选型\n\n"
+                    "前端采用 React、Vite 和 TanStack Query；后端采用 FastAPI 和 PostgreSQL。"
+                ),
+                search_text=(
+                    "系统设计 / 3. 技术选型\n\n"
+                    "前端采用 React、Vite 和 TanStack Query；后端采用 FastAPI 和 PostgreSQL。"
+                ),
+            )
+        )
+        db.commit()
+
+    response = client.post(
+        "/api/v1/rag/debug-query",
+        json={
+            "question": "AI智能获客技术栈是什么",
+            "use_llm": True,
+            "vector_top_k": 0,
+            "keyword_top_k": 20,
+            "trgm_top_k": 0,
+            "final_top_k": 2,
+            "min_final_score": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["candidates"][0]["section_title"] == "3. 技术选型"
+    assert body["candidates"][0]["final_score"] > body["candidates"][1]["final_score"]
+    assert body["selected_chunks"][0]["section_title"] == "3. 技术选型"
+    assert "React、Vite 和 TanStack Query" in body["prompt"]["text"]
+
+
 def test_debug_query_diagnoses_related_deleted_documents(client):
     from app.core.database import get_session
     from app.models.document import RagChunk, RagDocument, RagDocumentVersion

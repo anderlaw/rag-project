@@ -29,7 +29,7 @@ class DocumentRepository:
                 .order_by(RagDocument.created_at.desc(), RagDocument.id.desc())
             )
         )
-
+    # 找到最大的版本id，然后加1返回
     def next_version_no(self, db: Session, *, document_id: int) -> int:
         max_version = db.scalar(
             select(func.max(RagDocumentVersion.version_no)).where(RagDocumentVersion.document_id == document_id)
@@ -58,6 +58,7 @@ class DocumentRepository:
             parser_config_snapshot=parser_config_snapshot,
             chunk_strategy_name=chunk_strategy_name,
             chunk_config_snapshot=chunk_config_snapshot,
+            # 状态默认处理中，还没开始切片呢
             status="PROCESSING",
         )
         db.add(version)

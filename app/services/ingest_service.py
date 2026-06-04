@@ -22,11 +22,15 @@ def ingest_document(
 ) -> dict:
     settings = get_settings()
     _validate_upload(filename=filename, file_bytes=file_bytes)
-
+    # 文档仓库(业务与db操作相关)
     repo = DocumentRepository()
+    # 解析
     parser = DocumentParser()
+    # 切块
     chunker = Chunker(settings)
+    # 存储
     storage = create_storage_service(settings)
+    # embedding服务
     embedding_service = create_embedding_service(settings)
 
     file_type = Path(filename).suffix.lower().lstrip(".")
@@ -38,7 +42,7 @@ def ingest_document(
         document = repo.get_active(db, document_id)
         if document is None:
             raise DocumentNotFoundError("document not found")
-
+    # 更新版本
     version = repo.create_version(
         db,
         document_id=document.id,
@@ -50,11 +54,13 @@ def ingest_document(
         chunk_strategy_name=chunker.strategy_name,
         chunk_config_snapshot=chunker.config_snapshot(),
     )
+    # todo：事务未处理，后续需要优化，失败了要回滚版本状态等
     db.commit()
     db.refresh(document)
     db.refresh(version)
 
     try:
+        # 保存文件
         version.storage_key = storage.save(
             file_bytes=file_bytes,
             filename=filename,
@@ -64,13 +70,17 @@ def ingest_document(
         )
         db.commit()
 
+        # 解析文档，生成块，计算embedding，保存块
         blocks = parser.parse(filename=filename, file_bytes=file_bytes)
         if not blocks:
             raise ValueError("document has no extractable text")
 
-        chunk_groups = chunker.build_parent_child_chunks(blocks)
+        chunk_groups = chunker.build_parent_child_chunks(blocks, document_name=filename)
+        # 把所有 group 里的 children 全部取出来，摊平成一个列表，从左到右执行 for：
         child_chunks = [child for group in chunk_groups for child in group.children]
+        # 获取所有子 chunk 的 embedding，批量调用 embedding 服务，提升效率
         embeddings = embedding_service.embed([child.content_with_context for child in child_chunks])
+        
         for child, embedding in zip(child_chunks, embeddings, strict=True):
             child.embedding = embedding
 
@@ -81,6 +91,7 @@ def ingest_document(
                 document_id=document.id,
                 document_version_id=version.id,
                 parent_chunk_id=None,
+                # __dict__ 是Python 对象自带的一个属性，用来查看这个对象内部保存了哪些字段和值。
                 **group.parent.__dict__,
             )
             created_chunk_count += 1
@@ -94,7 +105,7 @@ def ingest_document(
                     **child.__dict__,
                 )
                 created_chunk_count += 1
-
+        # 更新版本状态和文档的当前版本
         repo.mark_version_completed(version, chunk_count=created_chunk_count)
         document.name = filename
         document.file_type = file_type
@@ -120,7 +131,7 @@ def ingest_document(
             db.commit()
         raise
 
-
+# validate上传的文档
 def _validate_upload(*, filename: str, file_bytes: bytes) -> None:
     settings = get_settings()
     extension = Path(filename).suffix.lower().lstrip(".")

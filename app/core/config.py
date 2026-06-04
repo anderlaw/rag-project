@@ -28,12 +28,13 @@ class Settings(BaseSettings):
     r2_access_key_id: str | None = None
     r2_secret_access_key: str | None = None
     r2_endpoint_url: str | None = None
-
+    # 允许最大上传文件大小，单位MB，以及允许的上传文件扩展名列表（上传时后端根据此规则对文件校验，不通过则raise异常）
     max_upload_size_mb: int = 20
     allowed_upload_extensions: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["pdf", "docx", "md", "txt"]
     )
 
+    # chunk相关设置：大小和重叠度
     parent_chunk_size: int = 1800
     parent_chunk_overlap: int = 200
     child_chunk_size: int = 500

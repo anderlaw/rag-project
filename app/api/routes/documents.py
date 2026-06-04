@@ -6,6 +6,7 @@ from app.core.errors import DocumentNotFoundError, UploadValidationError
 from app.repositories.document_repo import DocumentRepository
 from app.schemas.document import (
     ChunkListResponse,
+    ChunkResponse,
     DeleteDocumentResponse,
     DocumentDetailResponse,
     DocumentListResponse,
@@ -15,9 +16,11 @@ from app.schemas.document import (
 )
 from app.services.ingest_service import ingest_document
 
+# 定义APIRouter实例，设置前缀和标签
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
+# 上传文档接口，支持新文档上传和文档版本上传
 @router.post("/upload", response_model=UploadDocumentResponse)
 async def upload_document(
     file: UploadFile = File(...),
@@ -25,7 +28,7 @@ async def upload_document(
 ) -> UploadDocumentResponse:
     return await _handle_upload(db=db, file=file)
 
-
+# 更新文档
 @router.post("/{document_id}/versions/upload", response_model=UploadDocumentResponse)
 async def upload_document_version(
     document_id: int,
@@ -34,7 +37,7 @@ async def upload_document_version(
 ) -> UploadDocumentResponse:
     return await _handle_upload(db=db, file=file, document_id=document_id)
 
-
+# 获取文档列表
 @router.get("", response_model=DocumentListResponse)
 def list_documents(db: Session = Depends(get_db)) -> DocumentListResponse:
     documents = DocumentRepository().list_active(db)
@@ -61,7 +64,7 @@ def get_document(document_id: int, db: Session = Depends(get_db)) -> DocumentDet
         versions=[DocumentVersionResponse.model_validate(version) for version in versions],
     )
 
-
+# 获取文档的chunks
 @router.get("/{document_id}/chunks", response_model=ChunkListResponse)
 def list_document_chunks(
     document_id: int,
@@ -90,7 +93,7 @@ def list_document_chunks(
         document_version_id=version_id,
         chunk_type=chunk_type.upper(),
     )
-    return ChunkListResponse(items=chunks)
+    return ChunkListResponse(items=[ChunkResponse.model_validate(item) for item in chunks])
 
 
 @router.delete("/{document_id}", response_model=DeleteDocumentResponse)
@@ -103,13 +106,14 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> DeleteDo
     db.commit()
     return DeleteDocumentResponse(success=True)
 
-
+# 处理上传的内部函数
 async def _handle_upload(
     db: Session,
     file: UploadFile,
     document_id: int | None = None,
 ) -> UploadDocumentResponse:
     try:
+        # 此处读取字节数据，1.是根据字节获取文件hash 2.后续不同的解析器需要字节数据
         file_bytes = await file.read()
         result = ingest_document(
             db=db,

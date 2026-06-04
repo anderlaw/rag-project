@@ -43,6 +43,274 @@ def test_keyword_score_uses_normalized_query_synonyms():
     assert score >= 0.6
 
 
+def test_field_aware_keyword_score_boosts_section_heading_over_body_scatter():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import (
+        QuerySynonymGroup,
+        _field_aware_keyword_score,
+        _normalize_query,
+    )
+
+    normalized_query = _normalize_query(
+        "AI智能获客技术栈是什么",
+        synonym_groups=[
+            QuerySynonymGroup(name="技术栈", terms=("技术栈", "技术选型", "技术方案", "技术框架"))
+        ],
+    )
+    section_match = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=0,
+        child_index=0,
+        section_title="3. 技术选型",
+        heading_path="AI智能获客 / 系统设计 / 3. 技术选型",
+        content="前端采用 React、Vite 和 TanStack Query。",
+    )
+    body_scatter = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=1,
+        child_index=0,
+        section_title="页面结构",
+        heading_path="AI智能获客 / 页面结构",
+        content="这里散落提到技术、方案、框架、选择，但没有当前架构清单的真实内容。",
+    )
+
+    section_score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        section_match,
+        document_name="文档.md",
+        normalized_query=normalized_query,
+    )
+    body_score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        body_scatter,
+        document_name="AI获客数据权限相关.md",
+        normalized_query=normalized_query,
+    )
+
+    assert section_score >= 0.9
+    assert section_score > body_score
+
+
+def test_keyword_score_does_not_match_short_ascii_query_inside_longer_words():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import (
+        QuerySynonymGroup,
+        _field_aware_keyword_score,
+        _normalize_query,
+    )
+
+    normalized_query = _normalize_query(
+        "AI智能获客技术栈是什么",
+        synonym_groups=[
+            QuerySynonymGroup(name="技术栈", terms=("技术栈", "技术选型", "技术方案", "技术框架"))
+        ],
+    )
+    irrelevant_code_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=0,
+        child_index=0,
+        section_title="获取用户有权查看的创建人ID列表",
+        heading_path="获取用户有权查看的创建人ID列表",
+        content="```Plain Text\nDataIsolationService.get_allowed_creator_ids(user: User) -> List[int]\n```",
+    )
+    technology_stack_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=1,
+        child_index=0,
+        section_title="1.2 技术栈",
+        heading_path="AI获客数据权限相关 / 一、项目概览 / 1.2 技术栈",
+        content="|层级|技术|\n|---|---|\n|后端|FastAPI + TortoiseORM + PostgreSQL + Redis|",
+    )
+
+    irrelevant_score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        irrelevant_code_chunk,
+        document_name="AI获客数据权限相关.md",
+        normalized_query=normalized_query,
+    )
+    stack_score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        technology_stack_chunk,
+        document_name="AI获客数据权限相关.md",
+        normalized_query=normalized_query,
+    )
+
+    assert irrelevant_score < 0.7
+    assert stack_score > irrelevant_score
+
+
+def test_keyword_score_does_not_let_ai_token_alone_dominate_mixed_query():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import (
+        QuerySynonymGroup,
+        _field_aware_keyword_score,
+        _normalize_query,
+    )
+
+    normalized_query = _normalize_query(
+        "AI智能获客技术栈是什么",
+        synonym_groups=[
+            QuerySynonymGroup(name="技术栈", terms=("技术栈", "技术选型", "技术方案", "技术框架"))
+        ],
+    )
+    reference_link_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=0,
+        child_index=0,
+        section_title="9.1 角色权限清单",
+        heading_path="九、重要参考文档 / 9.1 角色权限清单",
+        content="> 文档位置: `ai-talk/prd/paas/角色权限清单.md`\n>",
+    )
+
+    score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        reference_link_chunk,
+        document_name="AI获客数据权限相关.md",
+        normalized_query=normalized_query,
+    )
+
+    assert score < 0.7
+
+
+def test_topicless_synonym_match_does_not_tie_topic_specific_stack_chunk():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import (
+        QuerySynonymGroup,
+        _field_aware_keyword_score,
+        _normalize_query,
+    )
+
+    normalized_query = _normalize_query(
+        "AI智能获客技术栈是什么",
+        synonym_groups=[
+            QuerySynonymGroup(name="技术栈", terms=("技术栈", "技术选型", "技术方案", "技术框架"))
+        ],
+    )
+    generic_stack_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=0,
+        child_index=0,
+        section_title="3. 技术选型",
+        heading_path="3. 技术选型",
+        content="框架：React\n构建工具：Vite\n状态管理：TanStack Query",
+    )
+    topic_stack_chunk = RagChunk(
+        document_id=2,
+        document_version_id=2,
+        chunk_type="CHILD",
+        chunk_index=1,
+        child_index=0,
+        section_title="1.2 技术栈",
+        heading_path="AI获客数据权限相关 / 一、项目概览 / 1.2 技术栈",
+        content="|层级|技术|\n|---|---|\n|后端|FastAPI + PostgreSQL|",
+    )
+
+    generic_score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        generic_stack_chunk,
+        document_name="RAG 知识库问答系统前端架构设计.md",
+        normalized_query=normalized_query,
+    )
+    topic_score = _field_aware_keyword_score(
+        "AI智能获客技术栈是什么",
+        topic_stack_chunk,
+        document_name="AI获客数据权限相关.md",
+        normalized_query=normalized_query,
+    )
+
+    assert generic_score < 0.7
+    assert topic_score > generic_score
+
+
+def test_topic_only_match_does_not_tie_synonym_intent_chunk():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import (
+        QuerySynonymGroup,
+        _field_aware_keyword_score,
+        _normalize_query,
+    )
+
+    normalized_query = _normalize_query(
+        "告诉我我的rag技术栈是啥",
+        synonym_groups=[
+            QuerySynonymGroup(name="技术栈", terms=("技术栈", "技术选型", "技术方案", "技术框架"))
+        ],
+    )
+    topic_only_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=0,
+        child_index=0,
+        section_title="2. 前端目标",
+        heading_path="2. 前端目标",
+        content="文档上传和管理\nRAG 问答\n检索调试\n用户反馈",
+    )
+    intent_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=1,
+        child_index=0,
+        section_title="3. 技术选型",
+        heading_path="3. 技术选型",
+        content="框架：React\n构建工具：Vite\n状态管理：TanStack Query",
+    )
+
+    topic_only_score = _field_aware_keyword_score(
+        "告诉我我的rag技术栈是啥",
+        topic_only_chunk,
+        document_name="RAG 知识库问答系统前端架构设计.md",
+        normalized_query=normalized_query,
+    )
+    intent_score = _field_aware_keyword_score(
+        "告诉我我的rag技术栈是啥",
+        intent_chunk,
+        document_name="RAG 知识库问答系统前端架构设计.md",
+        normalized_query=normalized_query,
+    )
+
+    assert topic_only_score < 0.7
+    assert intent_score > topic_only_score
+
+
+def test_directory_like_chunks_are_downweighted_but_tables_are_not():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import _quality_multiplier
+
+    directory_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=0,
+        child_index=0,
+        content="1. 前端技术栈\n2. 页面结构\n3. 状态管理\n4. 接口设计",
+    )
+    table_chunk = RagChunk(
+        document_id=1,
+        document_version_id=1,
+        chunk_type="CHILD",
+        chunk_index=1,
+        child_index=0,
+        content="|层级|技术|\n|---|---|\n|前端|React + Vite + TanStack Query|\n|后端|FastAPI + PostgreSQL|",
+    )
+
+    assert 0 < _quality_multiplier(directory_chunk) < 1
+    assert _quality_multiplier(table_chunk) == 1
+
+
 def test_vector_scoring_accepts_pgvector_array_embeddings():
     from app.services.rag_debug_service import _has_embedding, _vector_score
 

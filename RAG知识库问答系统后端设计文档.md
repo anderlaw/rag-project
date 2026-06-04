@@ -3075,7 +3075,7 @@ def field_aware_keyword_score(query, chunk, document_name, normalized_query):
     # 标题命中应明显高于正文散词命中。
     # section_title 是最精准结构信号，heading_path 次之。
     boosted_section = section_score * 1.35
-    boosted_heading = heading_score * 1.20
+    boosted_heading = min(heading_score * 1.20, 0.90)
 
     # document_name 只做弱信号，不能压过标题和正文。
     boosted_document = document_name_score * 0.45
@@ -3106,6 +3106,7 @@ score_text 可以继续使用现有 query term 覆盖率、中文有效字符覆
 不要为了标题 boost 单独引入 LLM。
 所有字段分数都必须 clamp 到 0~1。
 boost 只用于表达结构化字段可靠性，不表示相关性可以超过 1。
+heading_path 命中要强于正文散词命中，但要低于 section_title 精准命中，因此建议设置 0.90 左右的上限。
 如果 section_title 精准命中“技术选型”，即使 content 里只是散落出现“技术”“栈”等字，也应让标题命中的 chunk 排在正文散词 chunk 前面。
 如果 content 中完整出现用户问题或完整答案要点，content_score 仍然可以很高，不应被无意义标题压制。
 ```
@@ -3125,7 +3126,7 @@ def field_aware_trgm_score(query, chunk, document_name, normalized_query):
     return clamp(
         max(
             section_score * 1.20,
-            heading_score * 1.10,
+            min(heading_score * 1.10, 0.85),
             content_score,
             document_name_score * 0.40,
         ),

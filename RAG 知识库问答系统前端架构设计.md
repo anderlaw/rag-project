@@ -1561,9 +1561,9 @@ use_llm 开关
   ↓
 调用 POST /rag/debug-query use_llm=true
   ↓
-根据 llm.used 分支展示结果
-  - true：展示 AI 回答、模型和耗时
-  - false：展示低置信度/无召回拒答状态
+如果 llm.used=true，展示 AI 回答、模型和耗时
+  ↓
+如果 llm.used=false 且返回拒答，展示低置信度/无召回状态
   ↓
 右侧展示引用来源
   ↓
