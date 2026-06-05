@@ -1,7 +1,7 @@
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -48,6 +48,11 @@ COLLOQUIAL_QUERY_NOISE = ("告诉我", "我的", "是什么", "是啥")
 TOPIC_GATE_MIN_SCORE = 0.40
 INTENT_GATE_MIN_SCORE = 0.75
 TOPICLESS_SYNONYM_SCORE_CAP = 0.50
+# 保护槽参数：只从每路强命中的 top 3 中挑候选，避免弱相关内容被强行保送。
+PROTECTED_RECALL_TOP_K = 3
+# keyword/heading 达到 0.70 才算强命中，低于该阈值仍按普通 final_score 参与排序。
+LEXICAL_PROTECTION_MIN_SCORE = 0.70
+HEADING_PROTECTION_MIN_SCORE = 0.70
 
 
 @dataclass
@@ -72,9 +77,13 @@ class CandidateDraft:
     vector_score: float = 0
     keyword_score: float = 0
     trgm_score: float = 0
+    # heading_score 独立于 final_score，仅用于保护标题/章节强命中的候选不被纯向量噪声挤出。
+    heading_score: float = 0
     final_score: float = 0
     selected_for_prompt: bool = False
     rank: int = 0
+    # recall_channels 记录候选来自哪些召回通道，便于后续调试和前端展示通道来源。
+    recall_channels: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -95,16 +104,19 @@ class QuerySynonymGroup:
 def run_debug_query(db: Session, request: DebugQueryRequest) -> DebugQueryResponse:
     started_at = time.perf_counter()
     profile = _profile_from_request(request)
-    chunks = _list_searchable_chunks(db)
+    # all_chunks 保留完整可检索 CHILD 数量给文档状态诊断使用。
+    all_chunks = _list_searchable_chunks(db)
+    # chunks 是实际参与候选召回的集合，先过滤掉 ---、代码围栏等低信息 chunk。
+    chunks = _filter_candidate_chunks(all_chunks)
     # 诊断当前文档库状态，找出与查询相关但未参与检索的文档，分析原因并给出提示
-    diagnostics = _build_document_diagnostics(db, request.question, searchable_child_chunk_count=len(chunks))
+    diagnostics = _build_document_diagnostics(db, request.question, searchable_child_chunk_count=len(all_chunks))
     # 加载同义词词组
     synonym_groups = _load_active_synonym_groups(db)
     normalized_query = _normalize_query(request.question, synonym_groups=synonym_groups)
     # 调取向量模型获取问题的向量数据
     query_embedding = _embed_query(normalized_query.expanded_text) if profile.vector_top_k > 0 else None
 
-    # 计算向量相似度并排序
+    # 计算向量相似度并排序；这里使用过滤后的 chunks，低信息 chunk 不再进入候选池。
     vector_rows = _top_k(
         [
             (chunk, document_name, _vector_score(query_embedding, chunk.embedding))
@@ -118,7 +130,7 @@ def run_debug_query(db: Session, request: DebugQueryRequest) -> DebugQueryRespon
             (
                 chunk,
                 document_name,
-                # 字段感知关键词得分
+                # 字段感知关键词得分：标题、章节、正文、有效文档名分别计分后再合并。
                 _field_aware_keyword_score(
                     request.question,
                     chunk,
@@ -149,6 +161,14 @@ def run_debug_query(db: Session, request: DebugQueryRequest) -> DebugQueryRespon
 
     candidates = _merge_candidates(vector_rows=vector_rows, keyword_rows=keyword_rows, trgm_rows=trgm_rows)
     for candidate in candidates.values():
+        # heading_score 单独计算结构化标题命中，不直接改变总分，只服务于后续保护槽选择。
+        candidate.heading_score = _field_aware_heading_score(
+            request.question,
+            candidate.chunk,
+            candidate.document_name,
+            normalized_query=normalized_query,
+        )
+        # final_score 仍只由当前 profile 的 vector/keyword/trgm 权重决定，保护槽不会改写分数。
         candidate.final_score = _candidate_final_score(candidate, profile)
 
     ranked_candidates = sorted(candidates.values(), key=lambda candidate: candidate.final_score, reverse=True)
@@ -325,6 +345,11 @@ def _list_searchable_chunks(db: Session) -> list[tuple[RagChunk, str]]:
     return [(chunk, document_name) for chunk, document_name in rows]
 
 
+def _filter_candidate_chunks(chunks: list[tuple[RagChunk, str]]) -> list[tuple[RagChunk, str]]:
+    # 候选阶段就剔除低信息 chunk，避免它们占用 vector/keyword/trgm top_k 名额和前端候选列表。
+    return [(chunk, document_name) for chunk, document_name in chunks if not _is_low_information_chunk(chunk)]
+
+
 def _build_document_diagnostics(
     db: Session,
     question: str,
@@ -443,39 +468,93 @@ def _merge_candidates(
 ) -> dict[int, CandidateDraft]:
     candidates: dict[int, CandidateDraft] = {}
 
+    # 同一个 chunk 可能被多路召回命中，这里按 chunk.id 合并得分并累计召回通道。
     for chunk, document_name, score in vector_rows:
         draft = candidates.setdefault(chunk.id, CandidateDraft(chunk=chunk, document_name=document_name))
         draft.vector_score = score
+        draft.recall_channels.add("vector")
 
     for chunk, document_name, score in keyword_rows:
         draft = candidates.setdefault(chunk.id, CandidateDraft(chunk=chunk, document_name=document_name))
         draft.keyword_score = score
+        draft.recall_channels.add("keyword")
 
     for chunk, document_name, score in trgm_rows:
         draft = candidates.setdefault(chunk.id, CandidateDraft(chunk=chunk, document_name=document_name))
         draft.trgm_score = score
+        draft.recall_channels.add("trgm")
 
     return candidates
 
 
 def _select_final_chunks(candidates: list[CandidateDraft], *, profile: SearchProfile) -> list[CandidateDraft]:
     selected: list[CandidateDraft] = []
+    selected_chunk_ids: set[int] = set()
     seen_parent_ids: set[int] = set()
 
-    for candidate in candidates:
+    # 统一的入选函数：保护槽和按总分补齐都走这里，保证阈值、低信息过滤、父 chunk 去重一致。
+    def add_candidate(candidate: CandidateDraft) -> bool:
+        if len(selected) >= profile.final_top_k:
+            return False
         if candidate.final_score < profile.min_final_score:
-            continue
+            return False
         if _is_low_information_chunk(candidate.chunk):
-            continue
+            return False
         parent_id = candidate.chunk.parent_chunk_id or candidate.chunk.id
+        if candidate.chunk.id in selected_chunk_ids:
+            return False
         if parent_id in seen_parent_ids:
-            continue
+            return False
         selected.append(candidate)
+        selected_chunk_ids.add(candidate.chunk.id)
         seen_parent_ids.add(parent_id)
+        return True
+
+    # 先处理保护槽：heading 强命中和 keyword 强命中各最多保护 1 个，防止被纯 vector 高分候选全部挤掉。
+    for protected_candidates in (
+        _top_heading_match_candidates(candidates),
+        _top_keyword_match_candidates(candidates),
+    ):
+        for candidate in protected_candidates:
+            if add_candidate(candidate):
+                break
+
+    # 保护槽之后，再按 final_score 的原始排名补齐剩余名额。
+    for candidate in candidates:
+        add_candidate(candidate)
         if len(selected) >= profile.final_top_k:
             break
 
-    return selected
+    # 返回时仍按原候选排名顺序输出，避免 Prompt/页面顺序被保护槽插入顺序打乱。
+    return [candidate for candidate in candidates if candidate.chunk.id in selected_chunk_ids]
+
+
+def _top_keyword_match_candidates(candidates: list[CandidateDraft]) -> list[CandidateDraft]:
+    # keyword 保护槽只看 keyword_score 达标的候选，再从强命中 top 3 中择优。
+    strong_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.keyword_score >= LEXICAL_PROTECTION_MIN_SCORE
+    ]
+    return sorted(
+        strong_candidates,
+        key=lambda candidate: (candidate.keyword_score, candidate.final_score),
+        reverse=True,
+    )[:PROTECTED_RECALL_TOP_K]
+
+
+def _top_heading_match_candidates(candidates: list[CandidateDraft]) -> list[CandidateDraft]:
+    # heading 保护槽只看标题/章节字段命中，避免正文散词命中冒充结构化标题命中。
+    strong_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.heading_score >= HEADING_PROTECTION_MIN_SCORE
+    ]
+    return sorted(
+        strong_candidates,
+        key=lambda candidate: (candidate.heading_score, candidate.final_score),
+        reverse=True,
+    )[:PROTECTED_RECALL_TOP_K]
 
 
 def _top_k(rows: list[tuple[RagChunk, str, float]], *, top_k: int) -> list[tuple[RagChunk, str, float]]:
@@ -583,6 +662,34 @@ def _field_aware_trgm_score(
         content_score,
         document_name_score * 0.40,
     )
+    return _round_score(
+        _apply_topic_gate(
+            raw_score,
+            normalized_query=normalized_query,
+            document_name=document_name,
+            chunk=chunk,
+        )
+    )
+
+
+def _field_aware_heading_score(
+    question: str,
+    chunk: RagChunk,
+    document_name: str,
+    *,
+    normalized_query: NormalizedQuery | None = None,
+) -> float:
+    normalized_query = normalized_query or _normalize_query(question)
+    query_variants = _query_variants(normalized_query)
+    if not query_variants:
+        return 0
+
+    # heading_score 只使用 heading_path 和 section_title，不看正文内容，专门表达结构化位置命中。
+    heading_score = _max_keyword_score(query_variants, clean_structural_text(chunk.heading_path or ""))
+    section_score = _max_keyword_score(query_variants, clean_structural_text(chunk.section_title or ""))
+    raw_score = max(section_score * 1.35, min(heading_score * 1.20, 0.90))
+
+    # 仍然经过 topic gate，避免“技术栈”等泛化同义词把主题不相关的标题误判为强命中。
     return _round_score(
         _apply_topic_gate(
             raw_score,
@@ -919,13 +1026,15 @@ def _quality_multiplier(chunk: RagChunk) -> float:
         return 0.45
     return 1
 
-
+# 判断 chunk 是否是低信息量，用于候选阶段过滤和最终质量系数兜底。
 def _is_low_information_chunk(chunk: RagChunk) -> bool:
     content = (chunk.content or "").strip().replace("\\", "")
     if not content:
         return True
+    # 过滤只由 Markdown 分隔符、表格竖线、代码围栏符号组成的片段，例如 --- 或 ```。
     if re.fullmatch(r"[\s`\-_*|:]+", content):
         return True
+    # 转成小写后，判断是否等于常见代码围栏开头，避免它们进入候选和 Prompt。
     return content.lower() in {"```", "```txt", "```text", "```plain text", "```python", "```json"}
 
 

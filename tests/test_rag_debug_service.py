@@ -286,6 +286,60 @@ def test_topic_only_match_does_not_tie_synonym_intent_chunk():
     assert intent_score > topic_only_score
 
 
+def test_select_final_chunks_protects_keyword_and_heading_matches_from_vector_noise():
+    from app.models.document import RagChunk
+    from app.services.rag_debug_service import CandidateDraft, SearchProfile, _select_final_chunks
+
+    profile = SearchProfile(
+        id=None,
+        name="默认混合检索",
+        mode="HYBRID",
+        vector_top_k=20,
+        keyword_top_k=20,
+        trgm_top_k=20,
+        final_top_k=3,
+        vector_weight=0.65,
+        keyword_weight=0.25,
+        trgm_weight=0.10,
+        min_final_score=0.55,
+    )
+
+    def make_candidate(chunk_id: int, *, final_score: float, vector_score: float = 0, keyword_score: float = 0):
+        return CandidateDraft(
+            chunk=RagChunk(
+                id=chunk_id,
+                document_id=1,
+                document_version_id=1,
+                chunk_type="CHILD",
+                parent_chunk_id=chunk_id + 1000,
+                chunk_index=chunk_id,
+                child_index=0,
+                content=f"chunk {chunk_id}",
+            ),
+            document_name="doc.md",
+            vector_score=vector_score,
+            keyword_score=keyword_score,
+            final_score=final_score,
+        )
+
+    # 前四个候选模拟纯 vector 高分噪声；最后两个分别模拟 keyword/heading 强命中。
+    candidates = [
+        make_candidate(1, final_score=0.99, vector_score=0.99),
+        make_candidate(2, final_score=0.98, vector_score=0.98),
+        make_candidate(3, final_score=0.97, vector_score=0.97),
+        make_candidate(4, final_score=0.96, vector_score=0.96),
+        make_candidate(100, final_score=0.70, keyword_score=0.95),
+        make_candidate(101, final_score=0.60, keyword_score=0.20),
+    ]
+    # heading_score 不参与 final_score 加权，只用于结构化标题命中的保护槽。
+    candidates[-1].heading_score = 0.95
+
+    selected_ids = {candidate.chunk.id for candidate in _select_final_chunks(candidates, profile=profile)}
+
+    assert {100, 101}.issubset(selected_ids)
+    assert len(selected_ids) == 3
+
+
 def test_directory_like_chunks_are_downweighted_but_tables_are_not():
     from app.models.document import RagChunk
     from app.services.rag_debug_service import _quality_multiplier

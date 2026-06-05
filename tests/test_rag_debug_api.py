@@ -144,6 +144,8 @@ def test_debug_query_does_not_select_separator_chunks(client):
     assert [chunk["content"] for chunk in body["selected_chunks"]] == [
         "|层级|技术|\n|---|---|\n|后端|FastAPI + TortoiseORM + PostgreSQL + Redis|"
     ]
+    # 低信息 chunk 需要在候选阶段过滤，不能只是在 selected/prompt 阶段跳过。
+    assert all(candidate["content"] != "---" for candidate in body["candidates"])
     assert "---\n\n---" not in body["prompt"]["text"]
 
 
