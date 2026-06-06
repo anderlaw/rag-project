@@ -34,20 +34,24 @@ from app.services.synonym_service import (
     update_synonym_group,
     update_synonym_term,
 )
-# 定义RAG模块的APIRouter实例，设置前缀和标签
+
+# 检索增强模块（RAG）路由：调试检索、查询日志和同义词管理的 HTTP 入口。
 router = APIRouter(prefix="/rag", tags=["rag"])
 
-# 调试查询接口
+
+# 调试查询入口，返回候选、Prompt、诊断信息和 query log 快照。
 @router.post("/debug-query", response_model=DebugQueryResponse)
 def debug_query(request: DebugQueryRequest, db: Session = Depends(get_db)) -> DebugQueryResponse:
     return run_debug_query(db, request)
 
-# 查询规范化接口，把用户输入的查询进行规范化处理，返回规范化后的文本和相关信息
+
+# 查询规范化入口，用于查看清洗、同义词扩展和最终 expanded query。
 @router.post("/normalize-query", response_model=NormalizeQueryResponse)
 def normalize_query_endpoint(request: NormalizeQueryRequest, db: Session = Depends(get_db)) -> NormalizeQueryResponse:
     return normalize_query(db, request)
 
 
+# 获取单条调试查询日志详情。
 @router.get("/query-logs/{query_log_id}", response_model=QueryLogDetailResponse)
 def query_log_detail(query_log_id: int, db: Session = Depends(get_db)) -> QueryLogDetailResponse:
     detail = get_query_log_detail(db, query_log_id)
@@ -56,6 +60,7 @@ def query_log_detail(query_log_id: int, db: Session = Depends(get_db)) -> QueryL
     return detail
 
 
+# 从 query log 生成失败样本，复用当次检索快照作为排查上下文。
 @router.post("/query-logs/{query_log_id}/failure-cases", response_model=FailureCaseResponse)
 def save_query_log_as_failure_case(
     query_log_id: int,
@@ -68,6 +73,7 @@ def save_query_log_as_failure_case(
     return failure_case
 
 
+# 从 query log 生成评测样本，保留问题和期望答案来源。
 @router.post("/query-logs/{query_log_id}/eval-cases", response_model=EvalCaseResponse)
 def save_query_log_as_eval_case(
     query_log_id: int,
@@ -80,17 +86,19 @@ def save_query_log_as_eval_case(
     return eval_case
 
 
-# 列出“同义词组”
+# 列出同义词组及组内词项。
 @router.get("/synonyms", response_model=SynonymGroupListResponse)
 def list_synonyms(db: Session = Depends(get_db)) -> SynonymGroupListResponse:
     return list_synonym_groups(db)
 
-# 增加同义词组
+
+# 创建同义词组，并可同时写入初始词项。
 @router.post("/synonyms", response_model=SynonymGroupResponse)
 def create_synonym(request: SynonymGroupCreate, db: Session = Depends(get_db)) -> SynonymGroupResponse:
     return create_synonym_group(db, request)
 
-# 更新同义词组
+
+# 更新同义词组元数据或启用状态。
 @router.patch("/synonyms/{group_id}", response_model=SynonymGroupResponse)
 def update_synonym(group_id: int, request: SynonymGroupUpdate, db: Session = Depends(get_db)) -> SynonymGroupResponse:
     group = update_synonym_group(db, group_id, request)
@@ -98,7 +106,8 @@ def update_synonym(group_id: int, request: SynonymGroupUpdate, db: Session = Dep
         raise HTTPException(status_code=404, detail="synonym group not found")
     return group
 
-# 增加同义词项
+
+# 向指定同义词组增加词项。
 @router.post("/synonyms/{group_id}/terms", response_model=SynonymTermResponse)
 def create_synonym_term(group_id: int, request: SynonymTermCreate, db: Session = Depends(get_db)) -> SynonymTermResponse:
     term = add_synonym_term(db, group_id, request)
@@ -106,7 +115,8 @@ def create_synonym_term(group_id: int, request: SynonymTermCreate, db: Session =
         raise HTTPException(status_code=404, detail="synonym group not found")
     return term
 
-# 更新同义词项
+
+# 更新单个同义词词项。
 @router.patch("/synonyms/terms/{term_id}", response_model=SynonymTermResponse)
 def update_synonym_term_endpoint(
     term_id: int,

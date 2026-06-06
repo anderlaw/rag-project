@@ -1,6 +1,3 @@
-import pytest
-
-
 def test_failed_new_version_does_not_replace_current_version(client, monkeypatch):
     created = client.post(
         "/api/v1/documents/upload",

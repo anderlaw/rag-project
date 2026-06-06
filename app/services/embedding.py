@@ -5,6 +5,7 @@ import httpx
 from app.core.config import Settings
 
 DASHSCOPE_MAX_BATCH_SIZE = 10
+DASHSCOPE_DEFAULT_TIMEOUT_SECONDS = 120
 
 
 class FakeEmbeddingService:
@@ -31,7 +32,7 @@ class DashScopeEmbeddingService:
         model: str,
         dimension: int,
         batch_size: int = DASHSCOPE_MAX_BATCH_SIZE,
-        timeout_seconds: int = 60,
+        timeout_seconds: int = DASHSCOPE_DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.api_key = api_key
         self.api_url = api_url
@@ -45,16 +46,16 @@ class DashScopeEmbeddingService:
             return []
         embeddings: list[list[float]] = []
         for batch in _batched(texts, self.batch_size):
-            # extend表示：把另一个列表里的元素，一个个追加到 embeddings 这个列表里。
+            # 批量结果按顺序追加，保持输出 embedding 与输入文本一一对应。
             embeddings.extend(self._embed_batch(batch, text_type="document"))
         return embeddings
 
     def embed_query(self, text: str) -> list[float]:
-        # 调用API获取问题对应的向量
+        # 查询向量按单条文本请求，返回批量结果中的第一条。
         return self._embed_batch([text], text_type="query")[0]
-    # 调用模型获取文本对应的向量
+
     def _embed_batch(self, texts: list[str], *, text_type: str) -> list[list[float]]:
-        # 同步发起http请求到 DashScope 的 embedding API，获取文本的向量表示
+        # 调用 DashScope embedding API 获取文本向量；text_type 区分 query/document 语义。
         response = httpx.post(
             url=self.api_url,
             headers={
@@ -89,6 +90,6 @@ def create_embedding_service(settings: Settings):
         batch_size=settings.embedding_batch_size,
     )
 
-# 分批后的文本列表，例如 [["text1", "text2"], ["text3"]]
 def _batched(values: list[str], size: int) -> list[list[str]]:
+    # 将输入按 batch size 切分，例如 ["a", "b", "c"] -> [["a", "b"], ["c"]]。
     return [values[index : index + size] for index in range(0, len(values), size)]

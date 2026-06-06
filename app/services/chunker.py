@@ -55,12 +55,13 @@ class Chunker:
             "child_chunk_size": self.child_size,
             "child_chunk_overlap": self.child_overlap,
         }
-    # 把解析出来的文档 blocks，切成「父 chunk」和「子 chunk」两级结构。
-    # 注意⚠️：这里的*表示：* 后面的参数必须用关键字传参。，比如调用时必须：build_parent_child_chunks(blocks, document_name="产品说明书")
+
+    # 将解析后的文档 block 切成父子两级 chunk。
+    # 文件名参数（document_name）必须使用关键字传入，避免调用方把文件名误传成 blocks。
     def build_parent_child_chunks(self, blocks: list[ParsedBlock], *, document_name: str | None = None) -> list[ChunkGroup]:
         groups: list[ChunkGroup] = []
         parent_index = 0
-        # 这是干啥的？？？？？
+        # 解析块（ParsedBlock）目前不携带原始字符偏移，因此这里按 block 顺序和解析器拼接规则估算位置。
         absolute_start = 0
 
         for block in blocks:
@@ -70,9 +71,9 @@ class Chunker:
                 overlap=self.parent_overlap,
             ):
                 heading_path = " / ".join(block.heading_path) if block.heading_path else None
-                # 最后一级标题
+                # 当前小节标题取 heading path 的最后一级，便于检索和前端展示。
                 section_title = block.heading_path[-1] if block.heading_path else None
-                # 简单上下文拼接：标题+正文
+                # 带上下文正文把标题路径拼到正文前，提升 embedding 和 Prompt 的上下文完整度。
                 content_with_context = with_context(parent_text, heading_path)
 
                 parent = ChunkDraft(
@@ -101,7 +102,7 @@ class Chunker:
                     children.append(
                         ChunkDraft(
                             chunk_type="CHILD",
-                            # 这里的父子chunk_index貌似是一样的呀，todo:后续可以优化
+                            # 子 chunk 复用父 chunk_index，并通过 child_index 保持父级内部的稳定顺序。
                             chunk_index=parent_index,
                             child_index=child_index,
                             heading_path=heading_path,
@@ -121,9 +122,7 @@ class Chunker:
 
                 groups.append(ChunkGroup(parent=parent, children=children))
                 parent_index += 1
-            # 当前 block 处理完后，更新 absolute_start，这里可能不准
-            # 这里+2，大概率是因为原始文本里 block 和 block 之间有两个换行符，如果原文不是用两个换行分隔，则 absolute_start 就不准了。
-            # 后续可以考虑在 ParsedBlock 里直接记录原文的 start_char 和 end_char，这样就不依赖 chunker 的切分逻辑了
+            # 解析结果按两个换行连接 block 估算偏移；如果需要精确原文位置，应由 ParsedBlock 直接提供。
             absolute_start += len(block.text) + 2
         return groups
 
@@ -137,7 +136,7 @@ def split_text(text: str, *, size: int, overlap: int) -> list[tuple[str, int, in
 
     chunks: list[tuple[str, int, int]] = []
     start = 0
-    # 保证 overlap 小于 size。
+    # 重叠长度（overlap）必须小于 size，避免切分窗口无法向前推进。
     safe_overlap = min(max(overlap, 0), size - 1)
     while start < len(stripped):
         end = min(start + size, len(stripped))
@@ -174,8 +173,8 @@ def build_search_text(
     parts.append(content.strip())
     return "\n".join(part for part in parts if part)
 
-# 文件名标准化
 def normalize_file_stem(document_name: str) -> str:
+    # 文件名标准化后用于 search_text，减少副本、空白和扩展名噪声。
     stem = Path(document_name).stem.strip()
     stem = re.sub(r"\s+", " ", stem)
     stem = re.sub(r"[\s_-]*(copy|副本)\s*\d*$", "", stem, flags=re.IGNORECASE).strip()

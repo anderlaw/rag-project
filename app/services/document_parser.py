@@ -23,9 +23,9 @@ class DocumentParser:
         }
 
     def parse(self, *, filename: str, file_bytes: bytes) -> list[ParsedBlock]:
-        # 从文件名提取小写且不带前导点的扩展名（例如 "Report.PDF" → "pdf"）
+        # 从文件名提取小写且不带前导点的扩展名，例如 Report.PDF -> pdf。
         extension = Path(filename).suffix.lower().lstrip(".")
-        # todo:这里根据文件名来判断文件类型，存在被误导的风险，后续可以考虑根据文件头等内容来判断
+        # 当前解析器按上传文件名扩展名选择；如需防止伪造扩展名，应单独增加内容嗅探校验。
         if extension == "pdf":
             text = self._parse_pdf(file_bytes)
             return self._paragraph_blocks(text)
@@ -48,7 +48,7 @@ class DocumentParser:
 
     def _parse_markdown(self, file_bytes: bytes) -> list[ParsedBlock]:
         text = file_bytes.decode("utf-8", errors="replace")
-        # “解析后的内容块”列表
+        # 段落块列表保存解析结果，每个块携带当前 heading_path。
         blocks: list[ParsedBlock] = []
         heading_path: list[str] = []
         paragraph: list[str] = []
@@ -57,7 +57,7 @@ class DocumentParser:
             if paragraph:
                 blocks.append(ParsedBlock(text="\n".join(paragraph).strip(), heading_path=tuple(heading_path)))
                 paragraph.clear()
-        # text.splitlines():字符串按行拆成列表（识别所有换行类型）
+        # 按行解析 Markdown，splitlines 会识别不同平台的换行符。
         for raw_line in text.splitlines():
             line = raw_line.strip()
             if not line:
@@ -65,11 +65,11 @@ class DocumentParser:
                 continue
             if line.startswith("#"):
                 flush_paragraph()
-                # 层级根据#数量确定
+                # 标题层级由连续 # 数量决定。
                 level = len(line) - len(line.lstrip("#"))
-                # 标题
+                # 标题文本进入 heading_path，不直接作为正文段落。
                 title = line.lstrip("#").strip()
-                # 原地替换heading_path的内容，保持引用不变，方便后续使用
+                # 原地截断 heading_path，保留父级标题并替换当前层级之后的路径。
                 heading_path[:] = heading_path[: max(level - 1, 0)]
                 if title:
                     heading_path.append(title)

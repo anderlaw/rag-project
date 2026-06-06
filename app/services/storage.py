@@ -89,6 +89,7 @@ def build_storage_key(*, document_id: int, version_id: int, filename: str) -> st
 
 
 def sanitize_filename(filename: str) -> str:
+    # 存储 key 保留原扩展名，但统一规范文件名主体，保证本地和对象存储路径格式一致。
     stem = Path(filename).stem.lower()
     suffix = Path(filename).suffix.lower()
     safe_stem = re.sub(r"[^a-z0-9]+", "-", stem).strip("-")

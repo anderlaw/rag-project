@@ -16,11 +16,11 @@ from app.schemas.document import (
 )
 from app.services.ingest_service import ingest_document
 
-# 定义APIRouter实例，设置前缀和标签
+# 文档模块路由：集中处理上传、查询、版本查看和软删除等 HTTP 入口。
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-# 上传文档接口，支持新文档上传和文档版本上传
+# 新文档上传入口；具体入库、解析、切块和向量化流程交给 ingestion service。
 @router.post("/upload", response_model=UploadDocumentResponse)
 async def upload_document(
     file: UploadFile = File(...),
@@ -28,7 +28,8 @@ async def upload_document(
 ) -> UploadDocumentResponse:
     return await _handle_upload(db=db, file=file)
 
-# 更新文档
+
+# 现有文档的新版本上传入口；成功后新版本会成为当前版本。
 @router.post("/{document_id}/versions/upload", response_model=UploadDocumentResponse)
 async def upload_document_version(
     document_id: int,
@@ -37,13 +38,15 @@ async def upload_document_version(
 ) -> UploadDocumentResponse:
     return await _handle_upload(db=db, file=file, document_id=document_id)
 
-# 获取文档列表
+
+# 获取当前未删除的文档列表。
 @router.get("", response_model=DocumentListResponse)
 def list_documents(db: Session = Depends(get_db)) -> DocumentListResponse:
     documents = DocumentRepository().list_active(db)
     return DocumentListResponse(items=[DocumentResponse.model_validate(item) for item in documents])
 
 
+# 获取文档详情和版本列表。
 @router.get("/{document_id}", response_model=DocumentDetailResponse)
 def get_document(document_id: int, db: Session = Depends(get_db)) -> DocumentDetailResponse:
     repo = DocumentRepository()
@@ -64,7 +67,8 @@ def get_document(document_id: int, db: Session = Depends(get_db)) -> DocumentDet
         versions=[DocumentVersionResponse.model_validate(version) for version in versions],
     )
 
-# 获取文档的chunks
+
+# 获取文档 chunk；默认读取当前版本，也支持指定历史 version id。
 @router.get("/{document_id}/chunks", response_model=ChunkListResponse)
 def list_document_chunks(
     document_id: int,
@@ -96,6 +100,7 @@ def list_document_chunks(
     return ChunkListResponse(items=[ChunkResponse.model_validate(item) for item in chunks])
 
 
+# 删除文档采用软删除，保留版本和 chunk 数据用于审计或后续恢复。
 @router.delete("/{document_id}", response_model=DeleteDocumentResponse)
 def delete_document(document_id: int, db: Session = Depends(get_db)) -> DeleteDocumentResponse:
     repo = DocumentRepository()
@@ -106,14 +111,15 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> DeleteDo
     db.commit()
     return DeleteDocumentResponse(success=True)
 
-# 处理上传的内部函数
+
 async def _handle_upload(
     db: Session,
     file: UploadFile,
     document_id: int | None = None,
 ) -> UploadDocumentResponse:
+    # 上传入口共用处理：route 层只负责读取文件和映射 HTTP 异常。
     try:
-        # 此处读取字节数据，1.是根据字节获取文件hash 2.后续不同的解析器需要字节数据
+        # 入库流程需要原始字节用于 hash、解析、存储和 embedding。
         file_bytes = await file.read()
         result = ingest_document(
             db=db,

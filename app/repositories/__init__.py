@@ -1,1 +1,1 @@
-"""Repository package."""
+"""数据仓库包。"""

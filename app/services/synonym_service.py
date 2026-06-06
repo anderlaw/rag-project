@@ -16,7 +16,7 @@ from app.schemas.rag import (
     SynonymTermResponse,
     SynonymTermUpdate,
 )
-from app.services.rag_debug_service import _load_active_synonym_groups, _normalize_query
+from app.services.rag_debug.query_normalization import load_active_synonym_groups, normalize_query_text
 
 
 def list_synonym_groups(db: Session) -> SynonymGroupListResponse:
@@ -98,7 +98,7 @@ def update_synonym_term(db: Session, term_id: int, request: SynonymTermUpdate) -
 
 
 def normalize_query(db: Session, request: NormalizeQueryRequest) -> NormalizeQueryResponse:
-    normalized = _normalize_query(request.question, synonym_groups=_load_active_synonym_groups(db))
+    normalized = normalize_query_text(request.question, synonym_groups=load_active_synonym_groups(db))
     return NormalizeQueryResponse(
         original_text=normalized.original_text,
         normalized_text=normalized.normalized_text,
@@ -108,6 +108,7 @@ def normalize_query(db: Session, request: NormalizeQueryRequest) -> NormalizeQue
 
 
 def _new_term(group_id: int, request: SynonymTermCreate, now: datetime) -> RagSynonymTerm:
+    # 权重（weight）先持久化供后续排序/调参使用；当前查询扩展只按 ACTIVE 状态决定是否纳入。
     return RagSynonymTerm(
         group_id=group_id,
         term=request.term.strip(),

@@ -7,7 +7,9 @@
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:backend": ".venv/bin/pytest -q",
+    "test:backend:coverage": ".venv/bin/pytest --cov=app --cov-report=term-missing --cov-report=html"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.12",
