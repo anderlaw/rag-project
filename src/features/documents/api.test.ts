@@ -9,7 +9,7 @@ describe("documents api", () => {
   it("calls document endpoints with the expected methods and payloads", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === `${API_BASE}/documents` && !init) {
+      if (url === `${API_BASE}/documents` && init?.credentials === "include") {
         return jsonResponse({ items: [] });
       }
       if (url === `${API_BASE}/documents/7/chunks?version=current&chunk_type=CHILD`) {

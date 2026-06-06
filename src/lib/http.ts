@@ -14,12 +14,13 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   const requestInit = init
     ? {
         ...init,
+        credentials: init.credentials ?? ("include" as RequestCredentials),
         headers: {
           ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
           ...init.headers
         }
       }
-    : undefined;
+    : { credentials: "include" as RequestCredentials };
   const response = await fetch(resolveApiUrl(path), requestInit);
 
   if (!response.ok) {
@@ -34,9 +35,27 @@ function resolveApiUrl(path: string): string {
   if (/^https?:\/\//i.test(path)) {
     return path;
   }
-  const normalizedBaseURL = baseURL.replace(/\/+$/, "");
+  const normalizedBaseURL = normalizeLocalApiBaseURL(baseURL).replace(/\/+$/, "");
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${normalizedBaseURL}${normalizedPath}`;
+}
+
+function normalizeLocalApiBaseURL(value: string): string {
+  if (typeof window === "undefined") {
+    return value;
+  }
+  try {
+    const url = new URL(value);
+    const pageHost = window.location.hostname;
+    const localHosts = new Set(["localhost", "127.0.0.1"]);
+    if (localHosts.has(url.hostname) && localHosts.has(pageHost)) {
+      url.hostname = pageHost;
+      return url.toString().replace(/\/$/, "");
+    }
+  } catch {
+    return value;
+  }
+  return value;
 }
 
 async function readErrorMessage(response: Response): Promise<string> {

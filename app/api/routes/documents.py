@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_authenticated_user
 from app.core.errors import DocumentNotFoundError, UploadValidationError
 from app.repositories.document_repo import DocumentRepository
 from app.schemas.document import (
@@ -17,7 +17,7 @@ from app.schemas.document import (
 from app.services.ingest_service import ingest_document
 
 # 文档模块路由：集中处理上传、查询、版本查看和软删除等 HTTP 入口。
-router = APIRouter(prefix="/documents", tags=["documents"])
+router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depends(require_authenticated_user)])
 
 
 # 新文档上传入口；具体入库、解析、切块和向量化流程交给 ingestion service。

@@ -62,7 +62,7 @@ describe("document management app", () => {
     await userEvent.type(screen.getByLabelText("问题"), "差旅报销需要什么材料");
     await userEvent.click(screen.getByRole("button", { name: "运行调试" }));
 
-    expect(await screen.findByText("公司报销制度.pdf")).toBeInTheDocument();
+    expect((await screen.findAllByText("公司报销制度.pdf")).length).toBeGreaterThan(0);
     expect(screen.getByText("差旅报销")).toBeInTheDocument();
     expect(screen.getByText("0.86")).toBeInTheDocument();
     expect(screen.getByText("0.70")).toBeInTheDocument();
@@ -190,11 +190,75 @@ describe("document management app", () => {
     expect(await screen.findByText("ICP 客户画像")).toBeInTheDocument();
     expect(screen.getByText("命中词组")).toBeInTheDocument();
   });
+
+  it("lets a normal user search documents and submit query feedback", async () => {
+    vi.stubGlobal("fetch", mockSearchFetch());
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/rag/search"]}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByRole("heading", { name: "文档检索" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "文档管理" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "文档检索" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "检索调试" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "检索词典" })).not.toBeInTheDocument();
+
+    await userEvent.clear(screen.getByLabelText("问题"));
+    await userEvent.type(screen.getByLabelText("问题"), "差旅报销需要什么材料");
+    await userEvent.click(screen.getByRole("button", { name: "检索文档" }));
+
+    expect((await screen.findAllByText("公司报销制度.pdf")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("差旅报销需要提供发票、行程单、审批记录。").length).toBeGreaterThan(0);
+    expect(screen.getByText("住宿费用需要补充酒店水单或平台订单截图。")).toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole("button", { name: "展开上下文" })[0]);
+    expect(screen.getByText("员工提交差旅报销前，需要先确认出差审批已完成。")).toBeInTheDocument();
+    expect(screen.getByText("如涉及住宿费用，还需要提供酒店水单或平台订单截图。")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("部分有帮助"));
+    await userEvent.type(screen.getByLabelText("备注"), "第二条补充了住宿材料");
+    await userEvent.click(screen.getByRole("button", { name: "提交反馈" }));
+
+    expect(await screen.findByText("反馈 #77 已保存")).toBeInTheDocument();
+  });
+
+  it("redirects to login after logout", async () => {
+    vi.stubGlobal("fetch", mockLogoutFetch());
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/rag/search"]}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(await screen.findByRole("heading", { name: "文档检索" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByRole("heading", { name: "RAG Console" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "登录" })).toBeDisabled();
+  });
 });
 
 function mockFetch() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    const authResponse = authMeResponse(url);
+    if (authResponse) {
+      return authResponse;
+    }
     if (url === apiUrl("/documents")) {
       return jsonResponse({
         items: [
@@ -278,6 +342,10 @@ function mockFetch() {
 function mockDebugFetch() {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const authResponse = authMeResponse(url);
+    if (authResponse) {
+      return authResponse;
+    }
     if (url === apiUrl("/rag/debug-query") && init?.method === "POST") {
       return jsonResponse({
         query_log_id: 1001,
@@ -381,6 +449,10 @@ function mockDebugFetch() {
 function mockQueryLogFetch() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    const authResponse = authMeResponse(url);
+    if (authResponse) {
+      return authResponse;
+    }
     if (url === apiUrl("/rag/query-logs/1001")) {
       return jsonResponse({
         id: 1001,
@@ -537,6 +609,10 @@ function mockSynonymsFetch() {
   let created = false;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const authResponse = authMeResponse(url);
+    if (authResponse) {
+      return authResponse;
+    }
     if (url === apiUrl("/rag/synonyms") && !init?.method) {
       return jsonResponse({
         items: [
@@ -643,6 +719,99 @@ function mockSynonymsFetch() {
       });
     }
     throw new Error(`unexpected request ${url}`);
+  });
+}
+
+function mockSearchFetch() {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const authResponse = authMeResponse(url, "NORMAL_USER");
+    if (authResponse) {
+      return authResponse;
+    }
+    if (url === apiUrl("/rag/search") && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toEqual({
+        question: "差旅报销需要什么材料",
+        use_llm: true
+      });
+      return jsonResponse({
+        query_log_id: 1001,
+        question: "差旅报销需要什么材料",
+        status: "COMPLETED",
+        results: [
+          {
+            rank: 1,
+            query_candidate_id: 501,
+            chunk_id: 10,
+            answer_status: "ANSWERED",
+            answer: "差旅报销需要提供发票、行程单、审批记录。",
+            document_id: 1,
+            document_name: "公司报销制度.pdf",
+            section_title: "差旅报销",
+            heading_path: "报销制度 / 差旅报销",
+            hit_content: "差旅报销需要提供发票、行程单、审批记录。",
+            before_context: "员工提交差旅报销前，需要先确认出差审批已完成。",
+            after_context: "如涉及住宿费用，还需要提供酒店水单或平台订单截图。"
+          },
+          {
+            rank: 2,
+            query_candidate_id: 502,
+            chunk_id: 11,
+            answer_status: "ANSWERED",
+            answer: "住宿费用需要补充酒店水单或平台订单截图。",
+            document_id: 1,
+            document_name: "公司报销制度.pdf",
+            section_title: "住宿报销",
+            heading_path: "报销制度 / 住宿报销",
+            hit_content: "住宿报销需提供发票、酒店水单或平台订单截图。",
+            before_context: "",
+            after_context: ""
+          }
+        ],
+        warnings: []
+      });
+    }
+    if (url === apiUrl("/rag/search/1001/feedback") && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        rating: "PARTIALLY_HELPFUL",
+        comment: "第二条补充了住宿材料"
+      });
+      return jsonResponse({
+        id: 77,
+        query_log_id: 1001,
+        username: "user",
+        role: "NORMAL_USER",
+        rating: "PARTIALLY_HELPFUL",
+        comment: "第二条补充了住宿材料",
+        expected_answer: null,
+        created_at: "2026-06-06T10:00:00"
+      });
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+}
+
+function mockLogoutFetch() {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const authResponse = authMeResponse(url, "SUPER_ADMIN");
+    if (authResponse) {
+      return authResponse;
+    }
+    if (url === apiUrl("/auth/logout") && init?.method === "POST") {
+      return jsonResponse({ success: true });
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+}
+
+function authMeResponse(url: string, role: "SUPER_ADMIN" | "NORMAL_USER" = "SUPER_ADMIN"): Response | null {
+  if (url !== apiUrl("/auth/me")) {
+    return null;
+  }
+  return jsonResponse({
+    username: role === "SUPER_ADMIN" ? "admin" : "user",
+    role
   });
 }
 

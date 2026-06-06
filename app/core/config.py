@@ -18,8 +18,16 @@ class Settings(BaseSettings):
     app_name: str = "RAG 知识库问答系统 API"
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     database_url: str = "sqlite+pysqlite:///.data/rag.db"
     db_echo: bool = False
+
+    auth_session_secret: str | None = None
+    auth_token_expire_minutes: int = 1440
+    super_admin_username: str | None = None
+    super_admin_password: str | None = None
+    normal_user_username: str | None = None
+    normal_user_password: str | None = None
 
     storage_provider: Literal["local", "r2"] = "local"
     local_storage_dir: Path = Path(".data/uploads")
@@ -47,8 +55,10 @@ class Settings(BaseSettings):
     dashscope_api_key: str | None = None
     dashscope_api_url: str = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
 
-    llm_provider: Literal["none", "zhipu"] = "none"
+    llm_provider: Literal["none", "zhipu", "minimax"] = "none"
     zhipuai_api_key: str | None = None
+    minimax_api_key: str | None = None
+    minimax_api_base_url: str = "https://api.minimaxi.com/v1"
     llm_model: str = "glm-5.1"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 1200
@@ -60,6 +70,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip().lower().lstrip(".") for item in value.split(",") if item.strip()]
         return [item.lower().lstrip(".") for item in value]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -90,6 +107,26 @@ class Settings(BaseSettings):
 
         if self.llm_provider == "zhipu" and not self.zhipuai_api_key:
             raise ValueError("ZHIPUAI_API_KEY is required when LLM_PROVIDER=zhipu")
+        if self.llm_provider == "minimax" and not self.minimax_api_key:
+            raise ValueError("MINIMAX_API_KEY is required when LLM_PROVIDER=minimax")
+
+        if not self.auth_session_secret:
+            raise ValueError("AUTH_SESSION_SECRET is required")
+        configured_users = [
+            (self.super_admin_username, self.super_admin_password, "SUPER_ADMIN"),
+            (self.normal_user_username, self.normal_user_password, "NORMAL_USER"),
+        ]
+        active_users = [(username, password, role) for username, password, role in configured_users if username]
+        if not active_users:
+            raise ValueError("at least one auth user is required")
+        usernames = [username for username, _, _ in active_users]
+        if len(set(usernames)) != len(usernames):
+            raise ValueError("auth usernames must be unique")
+        missing_password_roles = [role for _, password, role in active_users if not password]
+        if missing_password_roles:
+            raise ValueError(f"missing password for auth roles: {', '.join(missing_password_roles)}")
+        if self.auth_token_expire_minutes <= 0:
+            raise ValueError("AUTH_TOKEN_EXPIRE_MINUTES must be positive")
 
         if self.embedding_provider == "dashscope" and "vision" in self.embedding_model.lower():
             raise ValueError("text ingestion requires a DashScope text embedding model, for example text-embedding-v4")

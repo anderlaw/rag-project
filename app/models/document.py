@@ -161,6 +161,32 @@ class RagQueryCandidate(Base):
     content_preview: Mapped[str] = mapped_column(Text, nullable=False)
     content_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     content_with_context_snapshot: Mapped[str | None] = mapped_column(Text)
+    result_answer: Mapped[str | None] = mapped_column(Text)
+    result_answer_status: Mapped[str | None] = mapped_column(Text)
+    result_answer_error: Mapped[str | None] = mapped_column(Text)
+    before_context_snapshot: Mapped[str | None] = mapped_column(Text)
+    after_context_snapshot: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RagQueryFeedback(Base):
+    __tablename__ = "rag_query_feedbacks"
+    __table_args__ = (
+        CheckConstraint(
+            "rating IN ('HELPFUL', 'PARTIALLY_HELPFUL', 'NOT_HELPFUL')",
+            name="chk_rag_query_feedbacks_rating",
+        ),
+        Index("idx_rag_query_feedbacks_query_log", "query_log_id"),
+        Index("idx_rag_query_feedbacks_username", "username"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    query_log_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    rating: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text)
+    expected_answer: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
 

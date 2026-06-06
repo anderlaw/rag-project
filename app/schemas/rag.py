@@ -71,6 +71,26 @@ class SynonymTermStatus(StrEnum):
     INACTIVE = "INACTIVE"
 
 
+class SearchStatus(StrEnum):
+    COMPLETED = "COMPLETED"
+    NO_RECALL = "NO_RECALL"
+    LLM_DISABLED = "LLM_DISABLED"
+    LLM_ERROR = "LLM_ERROR"
+
+
+class SearchResultAnswerStatus(StrEnum):
+    ANSWERED = "ANSWERED"
+    NO_ANSWER = "NO_ANSWER"
+    LLM_DISABLED = "LLM_DISABLED"
+    LLM_ERROR = "LLM_ERROR"
+
+
+class SearchFeedbackRating(StrEnum):
+    HELPFUL = "HELPFUL"
+    PARTIALLY_HELPFUL = "PARTIALLY_HELPFUL"
+    NOT_HELPFUL = "NOT_HELPFUL"
+
+
 class DebugQueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     search_profile_id: int | None = None
@@ -162,6 +182,53 @@ class DebugQueryResponse(BaseModel):
     prompt: DebugPromptResponse | None = None
     diagnostics: DebugDocumentDiagnosticsResponse
     llm: DebugLlmResponse
+
+
+class SearchRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    use_llm: bool = True
+
+
+class SearchResultResponse(BaseModel):
+    rank: int
+    query_candidate_id: int
+    chunk_id: int
+    answer_status: SearchResultAnswerStatus
+    answer: str | None = None
+    document_id: int
+    document_name: str
+    section_title: str | None = None
+    heading_path: str | None = None
+    hit_content: str
+    before_context: str = ""
+    after_context: str = ""
+
+
+class SearchResponse(BaseModel):
+    query_log_id: int
+    question: str
+    status: SearchStatus
+    results: list[SearchResultResponse]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SearchFeedbackRequest(BaseModel):
+    rating: SearchFeedbackRating
+    comment: str | None = Field(default=None, max_length=4000)
+    expected_answer: str | None = Field(default=None, max_length=4000)
+
+
+class SearchFeedbackResponse(BaseModel):
+    id: int
+    query_log_id: int
+    username: str
+    role: str
+    rating: SearchFeedbackRating
+    comment: str | None = None
+    expected_answer: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class QueryLogDetailResponse(BaseModel):

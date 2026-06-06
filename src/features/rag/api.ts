@@ -10,6 +10,10 @@ import type {
   FailureCase,
   NormalizeQueryResponse,
   QueryLogDetail,
+  SearchFeedback,
+  SearchFeedbackRequest,
+  SearchRequest,
+  SearchResponse,
   SynonymGroup,
   SynonymGroupListResponse,
   SynonymTerm,
@@ -21,6 +25,20 @@ const RAG_BASE = "/api/v1/rag";
 
 export function runDebugQuery(request: DebugQueryRequest): Promise<DebugQueryResponse> {
   return requestJson<DebugQueryResponse>(`${RAG_BASE}/debug-query`, {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function searchDocuments(request: SearchRequest): Promise<SearchResponse> {
+  return requestJson<SearchResponse>(`${RAG_BASE}/search`, {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function submitSearchFeedback(queryLogId: number, request: SearchFeedbackRequest): Promise<SearchFeedback> {
+  return requestJson<SearchFeedback>(`${RAG_BASE}/search/${queryLogId}/feedback`, {
     method: "POST",
     body: JSON.stringify(request)
   });

@@ -91,6 +91,57 @@ export type DebugQueryResponse = {
   llm: DebugLlm;
 };
 
+export type SearchStatus = "COMPLETED" | "NO_RECALL" | "LLM_DISABLED" | "LLM_ERROR";
+
+export type SearchResultAnswerStatus = "ANSWERED" | "NO_ANSWER" | "LLM_DISABLED" | "LLM_ERROR";
+
+export type SearchRequest = {
+  question: string;
+  use_llm: boolean;
+};
+
+export type SearchResult = {
+  rank: number;
+  query_candidate_id: number;
+  chunk_id: number;
+  answer_status: SearchResultAnswerStatus;
+  answer: string | null;
+  document_id: number;
+  document_name: string;
+  section_title: string | null;
+  heading_path: string | null;
+  hit_content: string;
+  before_context: string;
+  after_context: string;
+};
+
+export type SearchResponse = {
+  query_log_id: number;
+  question: string;
+  status: SearchStatus;
+  results: SearchResult[];
+  warnings: string[];
+};
+
+export type SearchFeedbackRating = "HELPFUL" | "PARTIALLY_HELPFUL" | "NOT_HELPFUL";
+
+export type SearchFeedbackRequest = {
+  rating: SearchFeedbackRating;
+  comment?: string | null;
+  expected_answer?: string | null;
+};
+
+export type SearchFeedback = {
+  id: number;
+  query_log_id: number;
+  username: string;
+  role: string;
+  rating: SearchFeedbackRating;
+  comment: string | null;
+  expected_answer: string | null;
+  created_at: string;
+};
+
 export type QueryLogDetail = {
   id: number;
   question: string;

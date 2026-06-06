@@ -8,7 +8,9 @@ import {
   getQueryLogDetail,
   listSynonymGroups,
   normalizeQuery,
-  runDebugQuery
+  runDebugQuery,
+  searchDocuments,
+  submitSearchFeedback
 } from "./api";
 
 const API_BASE = `${baseURL.replace(/\/+$/, "")}/api/v1`;
@@ -38,6 +40,41 @@ describe("rag api", () => {
     await expect(getQueryLogDetail(1001)).resolves.toMatchObject({
       id: 1001,
       question: "报销材料"
+    });
+  });
+
+  it("posts user document search requests to the backend", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe(`${API_BASE}/rag/search`);
+      expect(init?.method).toBe("POST");
+      expect(init?.credentials).toBe("include");
+      expect(init?.body).toBe(JSON.stringify({ question: "报销材料", use_llm: true }));
+      return jsonResponse({ query_log_id: 1, question: "报销材料", status: "COMPLETED", results: [], warnings: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(searchDocuments({ question: "报销材料", use_llm: true })).resolves.toMatchObject({
+      query_log_id: 1,
+      status: "COMPLETED"
+    });
+  });
+
+  it("submits search feedback to the backend", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe(`${API_BASE}/rag/search/1001/feedback`);
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe(
+        JSON.stringify({
+          rating: "NOT_HELPFUL",
+          comment: "没找到答案"
+        })
+      );
+      return jsonResponse({ id: 77, query_log_id: 1001, rating: "NOT_HELPFUL" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(submitSearchFeedback(1001, { rating: "NOT_HELPFUL", comment: "没找到答案" })).resolves.toMatchObject({
+      id: 77
     });
   });
 
