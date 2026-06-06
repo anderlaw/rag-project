@@ -8,6 +8,8 @@ export class HttpError extends Error {
   }
 }
 
+export const baseURL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
 export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const requestInit = init
     ? {
@@ -18,7 +20,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
         }
       }
     : undefined;
-  const response = await fetch(path, requestInit);
+  const response = await fetch(resolveApiUrl(path), requestInit);
 
   if (!response.ok) {
     const message = await readErrorMessage(response);
@@ -26,6 +28,15 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   }
 
   return (await response.json()) as T;
+}
+
+function resolveApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalizedBaseURL = baseURL.replace(/\/+$/, "");
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${normalizedBaseURL}${normalizedPath}`;
 }
 
 async function readErrorMessage(response: Response): Promise<string> {

@@ -5,6 +5,9 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { baseURL } from "./lib/http";
+
+const API_BASE = `${baseURL.replace(/\/+$/, "")}/api/v1`;
 
 describe("document management app", () => {
   it("loads documents and opens detail chunks", async () => {
@@ -192,7 +195,7 @@ describe("document management app", () => {
 function mockFetch() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === "/api/v1/documents") {
+    if (url === apiUrl("/documents")) {
       return jsonResponse({
         items: [
           {
@@ -208,7 +211,7 @@ function mockFetch() {
         ]
       });
     }
-    if (url === "/api/v1/documents/1") {
+    if (url === apiUrl("/documents/1")) {
       return jsonResponse({
         id: 1,
         name: "policy.txt",
@@ -248,7 +251,7 @@ function mockFetch() {
         ]
       });
     }
-    if (url === "/api/v1/documents/1/chunks?version=1&chunk_type=CHILD") {
+    if (url === apiUrl("/documents/1/chunks?version=1&chunk_type=CHILD")) {
       return jsonResponse({
         items: [
           {
@@ -275,7 +278,7 @@ function mockFetch() {
 function mockDebugFetch() {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/v1/rag/debug-query" && init?.method === "POST") {
+    if (url === apiUrl("/rag/debug-query") && init?.method === "POST") {
       return jsonResponse({
         query_log_id: 1001,
         question: "差旅报销需要什么材料",
@@ -378,7 +381,7 @@ function mockDebugFetch() {
 function mockQueryLogFetch() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === "/api/v1/rag/query-logs/1001") {
+    if (url === apiUrl("/rag/query-logs/1001")) {
       return jsonResponse({
         id: 1001,
         question: "AI智能获客技术栈是什么",
@@ -492,7 +495,7 @@ function mockQueryLogSaveFetch() {
   const baseFetch = mockQueryLogFetch();
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/v1/rag/query-logs/1001/failure-cases" && init?.method === "POST") {
+    if (url === apiUrl("/rag/query-logs/1001/failure-cases") && init?.method === "POST") {
       expect(JSON.parse(String(init.body))).toMatchObject({
         primary_failure_type: "RETRIEVAL_LOW_RANK",
         status: "ANALYZING",
@@ -508,7 +511,7 @@ function mockQueryLogSaveFetch() {
         priority: 2
       });
     }
-    if (url === "/api/v1/rag/query-logs/1001/eval-cases" && init?.method === "POST") {
+    if (url === apiUrl("/rag/query-logs/1001/eval-cases") && init?.method === "POST") {
       expect(JSON.parse(String(init.body))).toMatchObject({
         question: "AI智能获客技术栈是什么",
         expected_answer: "后端使用 FastAPI + PostgreSQL。",
@@ -534,7 +537,7 @@ function mockSynonymsFetch() {
   let created = false;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/v1/rag/synonyms" && !init?.method) {
+    if (url === apiUrl("/rag/synonyms") && !init?.method) {
       return jsonResponse({
         items: [
           {
@@ -608,7 +611,7 @@ function mockSynonymsFetch() {
         ]
       });
     }
-    if (url === "/api/v1/rag/synonyms" && init?.method === "POST") {
+    if (url === apiUrl("/rag/synonyms") && init?.method === "POST") {
       expect(JSON.parse(String(init.body))).toMatchObject({
         name: "客户画像",
         description: "获客领域词",
@@ -630,7 +633,7 @@ function mockSynonymsFetch() {
         terms: []
       });
     }
-    if (url === "/api/v1/rag/normalize-query" && init?.method === "POST") {
+    if (url === apiUrl("/rag/normalize-query") && init?.method === "POST") {
       expect(JSON.parse(String(init.body))).toEqual({ question: "告诉我ICP是啥" });
       return jsonResponse({
         original_text: "告诉我ICP是啥",
@@ -641,6 +644,10 @@ function mockSynonymsFetch() {
     }
     throw new Error(`unexpected request ${url}`);
   });
+}
+
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
 }
 
 function jsonResponse(body: unknown): Response {

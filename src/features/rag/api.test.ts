@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { baseURL } from "../../lib/http";
 import {
   createEvalCaseFromQueryLog,
   createFailureCaseFromQueryLog,
@@ -10,10 +11,12 @@ import {
   runDebugQuery
 } from "./api";
 
+const API_BASE = `${baseURL.replace(/\/+$/, "")}/api/v1`;
+
 describe("rag api", () => {
   it("posts debug query requests to the backend", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("/api/v1/rag/debug-query");
+      expect(String(input)).toBe(`${API_BASE}/rag/debug-query`);
       expect(init?.method).toBe("POST");
       expect(init?.body).toBe(JSON.stringify({ question: "报销材料", use_llm: true, final_top_k: 5 }));
       return jsonResponse({ question: "报销材料", candidates: [], selected_chunks: [], prompt: null });
@@ -27,7 +30,7 @@ describe("rag api", () => {
 
   it("gets query log detail from the backend", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toBe("/api/v1/rag/query-logs/1001");
+      expect(String(input)).toBe(`${API_BASE}/rag/query-logs/1001`);
       return jsonResponse({ id: 1001, question: "报销材料", candidates: [], selected_chunks: [] });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -40,7 +43,7 @@ describe("rag api", () => {
 
   it("saves a query log as a failure case", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("/api/v1/rag/query-logs/1001/failure-cases");
+      expect(String(input)).toBe(`${API_BASE}/rag/query-logs/1001/failure-cases`);
       expect(init?.method).toBe("POST");
       expect(init?.body).toBe(
         JSON.stringify({
@@ -66,7 +69,7 @@ describe("rag api", () => {
 
   it("saves a query log as an eval case", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("/api/v1/rag/query-logs/1001/eval-cases");
+      expect(String(input)).toBe(`${API_BASE}/rag/query-logs/1001/eval-cases`);
       expect(init?.method).toBe("POST");
       expect(init?.body).toBe(
         JSON.stringify({
@@ -94,7 +97,7 @@ describe("rag api", () => {
 
   it("lists synonym groups", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toBe("/api/v1/rag/synonyms");
+      expect(String(input)).toBe(`${API_BASE}/rag/synonyms`);
       return jsonResponse({ items: [{ id: 1, name: "技术栈", terms: [] }] });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -113,7 +116,7 @@ describe("rag api", () => {
       ]
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("/api/v1/rag/synonyms");
+      expect(String(input)).toBe(`${API_BASE}/rag/synonyms`);
       expect(init?.method).toBe("POST");
       expect(init?.body).toBe(JSON.stringify(request));
       return jsonResponse({ id: 2, name: "客户画像", terms: [] });
@@ -125,7 +128,7 @@ describe("rag api", () => {
 
   it("normalizes queries through the backend", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("/api/v1/rag/normalize-query");
+      expect(String(input)).toBe(`${API_BASE}/rag/normalize-query`);
       expect(init?.method).toBe("POST");
       expect(init?.body).toBe(JSON.stringify({ question: "告诉我ICP是啥" }));
       return jsonResponse({

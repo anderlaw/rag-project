@@ -1,25 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { baseURL } from "../../lib/http";
 import { deleteDocument, getDocument, listDocumentChunks, listDocuments, uploadDocument } from "./api";
+
+const API_BASE = `${baseURL.replace(/\/+$/, "")}/api/v1`;
 
 describe("documents api", () => {
   it("calls document endpoints with the expected methods and payloads", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/v1/documents" && !init) {
+      if (url === `${API_BASE}/documents` && !init) {
         return jsonResponse({ items: [] });
       }
-      if (url === "/api/v1/documents/7/chunks?version=current&chunk_type=CHILD") {
+      if (url === `${API_BASE}/documents/7/chunks?version=current&chunk_type=CHILD`) {
         return jsonResponse({ items: [] });
       }
-      if (url === "/api/v1/documents/upload" && init?.method === "POST") {
+      if (url === `${API_BASE}/documents/upload` && init?.method === "POST") {
         expect(init.body).toBeInstanceOf(FormData);
         return jsonResponse({ document_id: 7, version_id: 1, status: "COMPLETED", chunk_count: 2 });
       }
-      if (url === "/api/v1/documents/7" && init?.method === "DELETE") {
+      if (url === `${API_BASE}/documents/7` && init?.method === "DELETE") {
         return jsonResponse({ success: true });
       }
-      if (url === "/api/v1/documents/7") {
+      if (url === `${API_BASE}/documents/7`) {
         return jsonResponse({ id: 7, name: "policy.txt", versions: [] });
       }
       throw new Error(`unexpected request ${url}`);
