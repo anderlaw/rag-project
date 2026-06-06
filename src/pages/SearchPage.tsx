@@ -10,7 +10,7 @@ import { PageHeader } from "../components/common/PageHeader";
 import { searchDocuments, submitSearchFeedback } from "../features/rag/api";
 import type { SearchFeedbackRating, SearchResult, SearchResponse } from "../features/rag/types";
 
-const DEFAULT_QUESTION = "差旅报销需要什么材料？";
+const DEFAULT_QUESTION = "";
 
 const RATING_OPTIONS: Array<{ value: SearchFeedbackRating; label: string }> = [
   { value: "HELPFUL", label: "有帮助" },
