@@ -32,7 +32,7 @@ def client(tmp_path, monkeypatch) -> Iterator[TestClient]:
     Base.metadata.create_all(bind=get_engine())
 
     app = create_app()
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         login_response = test_client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin-pass"})
         assert login_response.status_code == 200
         yield test_client

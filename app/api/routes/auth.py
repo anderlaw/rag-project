@@ -21,8 +21,8 @@ def login(request: LoginRequest, response: Response) -> CurrentUserResponse:
         token,
         max_age=settings.auth_token_expire_minutes * 60,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         path="/",
     )
     return CurrentUserResponse(username=user.username, role=user.role)
@@ -35,5 +35,5 @@ def me(user: AuthUser = Depends(get_current_user)) -> CurrentUserResponse:
 
 @router.post("/logout", response_model=LogoutResponse)
 def logout(response: Response) -> LogoutResponse:
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="none")
     return LogoutResponse(success=True)

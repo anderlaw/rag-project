@@ -34,7 +34,7 @@ def auth_client(tmp_path, monkeypatch) -> Iterator[TestClient]:
     Base.metadata.create_all(bind=get_engine())
 
     app = create_app()
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         yield test_client
 
     Base.metadata.drop_all(bind=get_engine())
@@ -45,6 +45,9 @@ def test_login_me_and_logout(auth_client):
     assert response.status_code == 200
     assert response.json() == {"username": "admin", "role": "SUPER_ADMIN"}
     assert "rag_session" in response.headers["set-cookie"]
+    assert "HttpOnly" in response.headers["set-cookie"]
+    assert "SameSite=none" in response.headers["set-cookie"]
+    assert "Secure" in response.headers["set-cookie"]
 
     me_response = auth_client.get("/api/v1/auth/me")
     assert me_response.status_code == 200
@@ -52,6 +55,9 @@ def test_login_me_and_logout(auth_client):
 
     logout_response = auth_client.post("/api/v1/auth/logout")
     assert logout_response.status_code == 200
+    assert "HttpOnly" in logout_response.headers["set-cookie"]
+    assert "SameSite=none" in logout_response.headers["set-cookie"]
+    assert "Secure" in logout_response.headers["set-cookie"]
     assert auth_client.get("/api/v1/auth/me").status_code == 401
 
 
